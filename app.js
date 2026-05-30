@@ -40,6 +40,7 @@ const el = {
   settingsPanel: document.getElementById("settingsPanel"),
   spawnProtectionInput: document.getElementById("spawnProtectionInput"),
   snapStrengthInput: document.getElementById("snapStrengthInput"),
+  buildSnapEnabledInput: document.getElementById("buildSnapEnabledInput"),
   towerHealthInput: document.getElementById("towerHealthInput"),
   towerInvincibleInput: document.getElementById("towerInvincibleInput"),
   actionState: document.getElementById("actionState"),
@@ -67,6 +68,7 @@ const defaults = {
 
 const editorSettings = {
   snapStrength: GAME.SNAP_THRESHOLD,
+  buildModeSnapEnabled: true,
 };
 
 const view = { scale: 0.32, offsetX: 130, offsetY: 80 };
@@ -83,7 +85,9 @@ const interaction = {
   boxSelect: null,
   wallDraft: null,
   hoverTowerId: null,
-  towerChainLastId: null,
+  buildGhost: null,
+  towerDraftWarnActive: false,
+  wallDraftWarnActive: false,
   snapEnabled: true,
   guides: { x: null, y: null, xPoints: [], yPoints: [] },
 };
@@ -95,6 +99,7 @@ function setup() {
   bindUI();
   updateTeamSwatches();
   el.snapStrengthInput.value = String(editorSettings.snapStrength);
+  el.buildSnapEnabledInput.checked = editorSettings.buildModeSnapEnabled;
   el.towerHealthInput.max = "5";
   resizeCanvas();
   setMode("select");
@@ -147,6 +152,10 @@ function bindUI() {
     editorSettings.snapStrength = clamp(1, v, 500);
     el.snapStrengthInput.value = String(editorSettings.snapStrength);
     setActionState(`Object snapping strength: ${editorSettings.snapStrength}`, "success", true);
+  });
+  el.buildSnapEnabledInput.addEventListener("change", () => {
+    editorSettings.buildModeSnapEnabled = el.buildSnapEnabledInput.checked;
+    setActionState(`Build mode object snapping ${editorSettings.buildModeSnapEnabled ? "enabled" : "disabled"}`, "success", true);
   });
 
   el.settingsToggleBtn.addEventListener("click", () => {
@@ -213,7 +222,10 @@ function setMode(mode) {
   interaction.mode = mode;
   interaction.drag = null;
   interaction.boxSelect = null;
+  interaction.buildGhost = null;
   interaction.guides = { x: null, y: null, xPoints: [], yPoints: [] };
+  interaction.towerDraftWarnActive = false;
+  interaction.wallDraftWarnActive = false;
   if (mode !== "wall") {
     interaction.wallDraft = null;
     interaction.hoverTowerId = null;
@@ -229,8 +241,7 @@ function toolLabel(mode) {
   if (mode === "boundary") return "Draw Boundary";
   if (mode === "spawn") return "Place Spawn";
   if (mode === "bomb") return "Place Bomb Site";
-  if (mode === "tower") return "Place Tower";
-  if (mode === "wall") return "Connect Walls";
+  if (mode === "build") return "Build";
   return mode;
 }
 
@@ -283,12 +294,9 @@ function onMouseDown(event) {
     placeBomb(world);
     return;
   }
-  if (interaction.mode === "tower") {
+  if (interaction.mode === "build") {
     placeTower(world);
     return;
-  }
-  if (interaction.mode === "wall") {
-    handleWallToolClick(world);
   }
 }
 
@@ -319,14 +327,81 @@ function onMouseMove(event) {
     interaction.hoverTowerId = hover ? hover.id : null;
     requestRender();
   }
-  if (interaction.mode === "tower" && interaction.towerChainLastId != null) {
+  if (interaction.mode === "build") {
     const hover = hitTower(world);
     interaction.hoverTowerId = hover ? hover.id : null;
+    const startTower = getAutoWallStartTower();
+    const preview = getBuildPlacementPreview(world, startTower);
+    interaction.buildGhost = { x: preview.x, y: preview.y };
+    interaction.guides = {
+      x: preview.guideX,
+      y: preview.guideY,
+      xPoints: preview.xPoints,
+      yPoints: preview.yPoints,
+    };
     requestRender();
+  } else if (!interaction.drag) {
+    interaction.guides = { x: null, y: null, xPoints: [], yPoints: [] };
+  }
+  updateDraftLengthWarnings();
+  if (interaction.mode === "build") requestRender();
+}
+
+function updateDraftLengthWarnings() {
+  if (interaction.mode === "wall" && interaction.wallDraft) {
+    const startTower = getTowerById(interaction.wallDraft.startTowerId);
+    if (startTower) {
+      const hoverTower = interaction.hoverTowerId ? getTowerById(interaction.hoverTowerId) : null;
+      const rawTarget = hoverTower && hoverTower.id !== startTower.id
+        ? { x: hoverTower.x, y: hoverTower.y }
+        : interaction.wallDraft.mouse;
+      const length = distance(startTower.x, startTower.y, rawTarget.x, rawTarget.y);
+      const tooLong = length > GAME.WALL_MAX_LENGTH;
+      if (tooLong && !interaction.wallDraftWarnActive) {
+        setActionState(`Wall exceeds max length (${Math.round(length)})`, "error");
+        interaction.wallDraftWarnActive = true;
+      }
+      if (!tooLong && interaction.wallDraftWarnActive) {
+        setActionState("Idle", "idle");
+        interaction.wallDraftWarnActive = false;
+      }
+      return;
+    }
+  }
+  if (interaction.wallDraftWarnActive) {
+    interaction.wallDraftWarnActive = false;
+    setActionState("Idle", "idle");
   }
 
-  if (interaction.mode === "tower" && interaction.towerChainLastId != null && !interaction.drag && !interaction.boxSelect) {
-    requestRender();
+  if (interaction.mode !== "build") {
+    if (interaction.towerDraftWarnActive) {
+      interaction.towerDraftWarnActive = false;
+      setActionState("Idle", "idle");
+    }
+    return;
+  }
+  const startTower = getAutoWallStartTower();
+  if (!startTower) {
+    if (interaction.towerDraftWarnActive) {
+      interaction.towerDraftWarnActive = false;
+      setActionState("Idle", "idle");
+    }
+    return;
+  }
+  const hoverTower = interaction.hoverTowerId ? getTowerById(interaction.hoverTowerId) : null;
+  const snappedTarget = interaction.buildGhost || getBuildPlacementTarget(interaction.mouseWorld, startTower);
+  const rawTarget = hoverTower && hoverTower.id !== startTower.id
+    ? { x: hoverTower.x, y: hoverTower.y }
+    : snappedTarget;
+  const length = distance(startTower.x, startTower.y, rawTarget.x, rawTarget.y);
+  const tooLong = length > GAME.WALL_MAX_LENGTH;
+  if (tooLong && !interaction.towerDraftWarnActive) {
+    setActionState(`Wall exceeds max length (${Math.round(length)})`, "error");
+    interaction.towerDraftWarnActive = true;
+  }
+  if (!tooLong && interaction.towerDraftWarnActive) {
+    setActionState("Idle", "idle");
+    interaction.towerDraftWarnActive = false;
   }
 }
 
@@ -372,7 +447,8 @@ function onKeyDown(event) {
   if (key === "escape") {
     interaction.wallDraft = null;
     interaction.hoverTowerId = null;
-    interaction.towerChainLastId = null;
+    interaction.towerDraftWarnActive = false;
+    interaction.wallDraftWarnActive = false;
     interaction.boxSelect = null;
     interaction.drag = null;
     interaction.guides = { x: null, y: null, xPoints: [], yPoints: [] };
@@ -506,6 +582,18 @@ function applyDrag(world) {
     return;
   }
 
+  const movedTowerTargets = getMovedTowerTargets(drag, dx, dy);
+  if (movedTowerTargets.size > 0) {
+    if (hasTowerOnWallConflict(movedTowerTargets)) {
+      setActionState("A tower cannot overlap an existing wall.", "warn");
+      return;
+    }
+    if (findWallOverlap(movedTowerTargets)) {
+      setActionState("Walls cannot overlap or intersect.", "warn");
+      return;
+    }
+  }
+
   drag.startPositions.forEach((pos, key) => setKeyPosition(key, roundTo(pos.x + dx, 3), roundTo(pos.y + dy, 3)));
   interaction.guides = { x: snap.guideX, y: snap.guideY, xPoints: snap.xPoints, yPoints: snap.yPoints };
   drag.moved = Math.hypot(dx, dy) > 0.001;
@@ -549,6 +637,18 @@ function getDraggedTowerPos(tower, drag, dx, dy, scale) {
   const start = drag.startPositions.get(key);
   if (!start) return { x: tower.x, y: tower.y };
   return { x: start.x + dx * scale, y: start.y + dy * scale };
+}
+
+function getMovedTowerTargets(drag, dx, dy) {
+  const overrides = new Map();
+  drag.keys.forEach((key) => {
+    const entry = resolveKey(key);
+    if (!entry || entry.type !== "tower") return;
+    const start = drag.startPositions.get(key);
+    if (!start) return;
+    overrides.set(entry.item.id, { x: roundTo(start.x + dx, 3), y: roundTo(start.y + dy, 3) });
+  });
+  return overrides;
 }
 
 function finishDrag() {
@@ -630,13 +730,63 @@ function placeTower(world) {
     setActionState("Cannot place tower outside map boundary.", "warn", true);
     return;
   }
+  const startTower = getAutoWallStartTower();
+  const targetTower = hitTower(world);
+
+  if (startTower && targetTower) {
+    if (targetTower.id === startTower.id) {
+      setActionState("A tower cannot connect to itself.", "warn", true);
+      return;
+    }
+    if (targetTower.team_id !== startTower.team_id) {
+      setActionState("Cannot connect towers with different team colors.", "error", true);
+      return;
+    }
+    if (hasDuplicateWall(startTower.id, targetTower.id)) {
+      selection.clear();
+      selection.add(makeKey("tower", targetTower.uid));
+      renderSelectionPanel();
+      setActionState("This wall already exists.", "warn", true);
+      return;
+    }
+    const length = distance(startTower.x, startTower.y, targetTower.x, targetTower.y);
+    if (length > GAME.WALL_MAX_LENGTH) {
+      setActionState(`Wall too long (${Math.round(length)}), max ${GAME.WALL_MAX_LENGTH}`, "error", true);
+      return;
+    }
+    if (findWallOverlapForSegment({ x: startTower.x, y: startTower.y }, { x: targetTower.x, y: targetTower.y }, startTower.id, targetTower.id)) {
+      setActionState("Walls cannot overlap or intersect.", "error", true);
+      return;
+    }
+    withAction("CREATE_WALL", () => {
+      state.walls.push({ uid: createUid("wall"), id: nextWallLocalId(), t1: startTower.id, t2: targetTower.id, team_id: startTower.team_id });
+      selection.clear();
+      selection.add(makeKey("tower", targetTower.uid));
+      return true;
+    });
+    interaction.towerDraftWarnActive = false;
+    renderSelectionPanel();
+    setActionState(`Wall created (${Math.round(length)} units)`, "success", true);
+    return;
+  }
+
+  if (targetTower) {
+    selection.clear();
+    selection.add(makeKey("tower", targetTower.uid));
+    renderSelectionPanel();
+    setActionState("Cannot place a tower on top of another tower.", "warn", true);
+    return;
+  }
+
   withAction("PLACE_TOWER", () => {
-    let x = roundTo(world.x, 3);
-    let y = roundTo(world.y, 3);
-    const prev = interaction.towerChainLastId != null ? getTowerById(interaction.towerChainLastId) : null;
-    if (prev) {
-      const dx = x - prev.x;
-      const dy = y - prev.y;
+    const startTower = getAutoWallStartTower();
+    const buildTarget = getBuildPlacementTarget(world, startTower);
+    let x = roundTo(buildTarget.x, 3);
+    let y = roundTo(buildTarget.y, 3);
+    const teamId = startTower ? startTower.team_id : defaults.defaultTeam;
+    if (startTower) {
+      const dx = x - startTower.x;
+      const dy = y - startTower.y;
       const dist = Math.hypot(dx, dy);
       if (dist > GAME.WALL_MAX_LENGTH) {
         setActionState(`Wall too long (${Math.round(dist)}), max ${GAME.WALL_MAX_LENGTH}`, "error", true);
@@ -647,23 +797,38 @@ function placeTower(world) {
       setActionState("Cannot place tower outside map boundary.", "warn", true);
       return false;
     }
+    if (hasTowerOverlapAt(x, y)) {
+      setActionState("Cannot place a tower on top of another tower.", "warn", true);
+      return false;
+    }
+    if (isTowerPositionOnWall(x, y)) {
+      setActionState("Cannot place tower on top of an existing wall.", "warn", true);
+      return false;
+    }
+    if (startTower) {
+      const overlap = findWallOverlapForSegment({ x: startTower.x, y: startTower.y }, { x, y }, startTower.id, null);
+      if (overlap) {
+        setActionState("Walls cannot overlap or intersect.", "error", true);
+        return false;
+      }
+    }
     const tower = {
       uid: createUid("tower"),
       id: nextTowerId(),
-      team_id: defaults.defaultTeam,
+      team_id: teamId,
       x,
       y,
       health: clamp(1, Math.round(defaults.towerHealth), 5),
       is_invincible: defaults.towerInvincible,
     };
     state.towers.push(tower);
-    if (prev && !hasDuplicateWall(prev.id, tower.id)) {
-      const length = distance(prev.x, prev.y, tower.x, tower.y);
+    if (startTower && !hasDuplicateWall(startTower.id, tower.id)) {
+      const length = distance(startTower.x, startTower.y, tower.x, tower.y);
       if (length <= GAME.WALL_MAX_LENGTH + 0.0001) {
-        state.walls.push({ uid: createUid("wall"), id: nextWallLocalId(), t1: prev.id, t2: tower.id, team_id: defaults.defaultTeam });
+        state.walls.push({ uid: createUid("wall"), id: nextWallLocalId(), t1: startTower.id, t2: tower.id, team_id: startTower.team_id });
       }
     }
-    interaction.towerChainLastId = tower.id;
+    interaction.towerDraftWarnActive = false;
     selection.clear();
     selection.add(makeKey("tower", tower.uid));
     setActionState("Tower placed", "success", true);
@@ -681,6 +846,7 @@ function handleWallToolClick(world) {
     }
     interaction.wallDraft = { startTowerId: hit.id, startTowerUid: hit.uid, mouse: { ...world } };
     interaction.hoverTowerId = hit.id;
+    interaction.wallDraftWarnActive = false;
     selection.clear();
     selection.add(makeKey("tower", hit.uid));
     renderSelectionPanel();
@@ -691,6 +857,7 @@ function handleWallToolClick(world) {
   if (!hit) {
     interaction.wallDraft = null;
     interaction.hoverTowerId = null;
+    interaction.wallDraftWarnActive = false;
     setActionState("Wall draft cancelled", "idle", true);
     requestRender();
     return;
@@ -708,21 +875,53 @@ function handleWallToolClick(world) {
   const a = getTowerById(startId);
   const b = getTowerById(endId);
   if (!a || !b) return;
+  if (a.team_id !== b.team_id) {
+    setActionState("Connected towers must share the same team color.", "error", true);
+    return;
+  }
   const length = distance(a.x, a.y, b.x, b.y);
   if (length > GAME.WALL_MAX_LENGTH) {
     setActionState(`Wall too long (${Math.round(length)}), max ${GAME.WALL_MAX_LENGTH}`, "error", true);
     return;
   }
+  if (findWallOverlapForSegment({ x: a.x, y: a.y }, { x: b.x, y: b.y }, a.id, b.id)) {
+    setActionState("Walls cannot overlap or intersect.", "error", true);
+    return;
+  }
   withAction("CREATE_WALL", () => {
-    state.walls.push({ uid: createUid("wall"), id: nextWallLocalId(), t1: startId, t2: endId, team_id: defaults.defaultTeam });
+    state.walls.push({ uid: createUid("wall"), id: nextWallLocalId(), t1: startId, t2: endId, team_id: a.team_id });
     selection.clear();
     selection.add(makeKey("wall", state.walls[state.walls.length - 1].uid));
     return true;
   });
   interaction.wallDraft = null;
   interaction.hoverTowerId = null;
+  interaction.wallDraftWarnActive = false;
   renderSelectionPanel();
   setActionState(`Wall created (${Math.round(length)} units)`, "success", true);
+}
+
+function getAutoWallStartTower() {
+  if (interaction.mode !== "build") return null;
+  if (selection.size !== 1) return null;
+  const [key] = Array.from(selection);
+  const entry = resolveKey(key);
+  if (!entry || entry.type !== "tower") return null;
+  return entry.item;
+}
+
+function getBuildPlacementTarget(world, startTower = null) {
+  const preview = getBuildPlacementPreview(world, startTower);
+  return { x: preview.x, y: preview.y };
+}
+
+function getBuildPlacementPreview(world, startTower = null) {
+  if (!editorSettings.buildModeSnapEnabled || !interaction.snapEnabled) {
+    return { x: world.x, y: world.y, guideX: null, guideY: null, xPoints: [], yPoints: [] };
+  }
+  const exclude = new Set();
+  if (startTower) exclude.add(makeKey("tower", startTower.uid));
+  return getSnapResult(world.x, world.y, exclude);
 }
 
 function getSnapResult(targetX, targetY, excludeKeys) {
@@ -892,11 +1091,9 @@ function renderMultiSelection(entries) {
     applyTeam.addEventListener("click", () => {
       withAction("MASS_TEAM_EDIT", () => {
         let changed = false;
+        const visitedTowerIds = new Set();
         entries.forEach((entry) => {
-          if (["tower", "spawn", "wall", "structure"].includes(entry.type) && entry.item.team_id !== selectedTeam) {
-            entry.item.team_id = selectedTeam;
-            changed = true;
-          }
+          changed = applyTeamToEntry(entry, selectedTeam, visitedTowerIds) || changed;
         });
         return changed;
       });
@@ -940,7 +1137,7 @@ function renderTowerSelection(entry) {
     ${snapToggleMarkup()}
     <button id="deleteTowerBtn" class="danger-button">Delete Tower</button>
   `;
-  bindTeamSwatchGroup(el.selectionPanel, tower.team_id, (nextTeam) => withAction("EDIT_TOWER", () => { tower.team_id = nextTeam; return true; }));
+  bindTeamSwatchGroup(el.selectionPanel, tower.team_id, (nextTeam) => withAction("EDIT_TOWER", () => setConnectedComponentTeam(tower.id, nextTeam)));
   bindNumericChange("selTowerX", (v) => withAction("MOVE_TOWER", () => { tower.x = roundTo(v, 3); return true; }));
   bindNumericChange("selTowerY", (v) => withAction("MOVE_TOWER", () => { tower.y = roundTo(v, 3); return true; }));
   bindNumericChange("selTowerHealth", (v) => withAction("EDIT_TOWER", () => { tower.health = clamp(1, Math.round(v), 5); return true; }));
@@ -1011,7 +1208,7 @@ function renderWallSelection(entry) {
     ${snapToggleMarkup()}
     <button id="deleteWallBtn" class="danger-button">Delete Wall</button>
   `;
-  bindTeamSwatchGroup(el.selectionPanel, wall.team_id, (nextTeam) => withAction("EDIT_WALL", () => { wall.team_id = nextTeam; return true; }));
+  bindTeamSwatchGroup(el.selectionPanel, wall.team_id, (nextTeam) => withAction("EDIT_WALL", () => setConnectedComponentTeam(wall.t1, nextTeam)));
   bindSnapToggle();
   document.getElementById("deleteWallBtn").addEventListener("click", deleteSelected);
 }
@@ -1051,6 +1248,46 @@ function renderStructureSelection(entry) {
   bindNumericChange("selStructureSize", (v) => withAction("EDIT_STRUCTURE", () => { s.size = Math.max(20, Math.round(v)); return true; }));
   bindSnapToggle();
   document.getElementById("deleteStructureBtn").addEventListener("click", deleteSelected);
+}
+
+function applyTeamToEntry(entry, teamId, visitedTowerIds = new Set()) {
+  if (entry.type === "tower") return setConnectedComponentTeam(entry.item.id, teamId, visitedTowerIds);
+  if (entry.type === "wall") return setConnectedComponentTeam(entry.item.t1, teamId, visitedTowerIds);
+  if (entry.type === "spawn" || entry.type === "structure") {
+    if (entry.item.team_id === teamId) return false;
+    entry.item.team_id = teamId;
+    return true;
+  }
+  return false;
+}
+
+function setConnectedComponentTeam(startTowerId, teamId, visitedTowerIds = new Set()) {
+  if (!Number.isInteger(startTowerId)) return false;
+  const startTower = getTowerById(startTowerId);
+  if (!startTower) return false;
+  let changed = false;
+  const queue = [startTowerId];
+  while (queue.length) {
+    const towerId = queue.shift();
+    if (visitedTowerIds.has(towerId)) continue;
+    visitedTowerIds.add(towerId);
+    const tower = getTowerById(towerId);
+    if (!tower) continue;
+    if (tower.team_id !== teamId) {
+      tower.team_id = teamId;
+      changed = true;
+    }
+    state.walls.forEach((wall) => {
+      if (wall.t1 !== towerId && wall.t2 !== towerId) return;
+      if (wall.team_id !== teamId) {
+        wall.team_id = teamId;
+        changed = true;
+      }
+      const other = wall.t1 === towerId ? wall.t2 : wall.t1;
+      if (!visitedTowerIds.has(other)) queue.push(other);
+    });
+  }
+  return changed;
 }
 
 function bindNumericChange(id, cb) {
@@ -1138,6 +1375,9 @@ function onStateChanged() {
 function onStateReplaced() {
   interaction.wallDraft = null;
   interaction.hoverTowerId = null;
+  interaction.buildGhost = null;
+  interaction.towerDraftWarnActive = false;
+  interaction.wallDraftWarnActive = false;
   interaction.drag = null;
   interaction.boxSelect = null;
   interaction.guides = { x: null, y: null, xPoints: [], yPoints: [] };
@@ -1163,6 +1403,7 @@ function draw() {
   drawTowerChainGhostWall();
   drawSpawns();
   drawTowers();
+  drawBuildGhostTower();
   drawGuides();
   drawWallDraft();
   drawBoxSelection();
@@ -1363,18 +1604,18 @@ function drawTowers() {
 }
 
 function drawTowerChainGhostWall() {
-  if (interaction.mode !== "tower") return;
-  if (interaction.towerChainLastId == null) return;
-  const startTower = getTowerById(interaction.towerChainLastId);
+  if (interaction.mode !== "build") return;
+  const startTower = getAutoWallStartTower();
   if (!startTower) return;
 
   const hoveredTower = interaction.hoverTowerId ? getTowerById(interaction.hoverTowerId) : null;
+  const snappedTarget = getBuildPlacementTarget(interaction.mouseWorld, startTower);
   const rawTarget = hoveredTower && hoveredTower.id !== startTower.id
     ? { x: hoveredTower.x, y: hoveredTower.y }
-    : { x: interaction.mouseWorld.x, y: interaction.mouseWorld.y };
+    : snappedTarget;
   const length = distance(startTower.x, startTower.y, rawTarget.x, rawTarget.y);
   const ratio = length / GAME.WALL_MAX_LENGTH;
-  let color = getTeamColor(defaults.defaultTeam);
+  let color = getTeamColor(startTower.team_id);
   if (ratio > 0.95) color = COLORS.warn;
   if (ratio > 1) color = COLORS.danger;
   const endWorld = clipLineToMaxLength(startTower.x, startTower.y, rawTarget.x, rawTarget.y, GAME.WALL_MAX_LENGTH);
@@ -1391,7 +1632,34 @@ function drawTowerChainGhostWall() {
   ctx.lineTo(end.x, end.y);
   ctx.stroke();
   ctx.globalAlpha = 1.0;
-  if (length > GAME.WALL_MAX_LENGTH) setActionState(`Wall exceeds max length (${Math.round(length)})`, "error");
+}
+
+function drawBuildGhostTower() {
+  if (interaction.mode !== "build") return;
+  const startTower = getAutoWallStartTower();
+  const ghost = interaction.buildGhost || getBuildPlacementTarget(interaction.mouseWorld, startTower);
+  if (!ghost) return;
+
+  const p = worldToScreen(ghost.x, ghost.y);
+  const teamId = startTower ? startTower.team_id : defaults.defaultTeam;
+  const color = getTeamColor(teamId);
+
+  ctx.globalAlpha = 0.35;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, 44 * view.scale, 0, Math.PI * 2);
+  ctx.lineWidth = 8 * view.scale;
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.globalAlpha = 0.9;
+  ctx.fillStyle = "#FFFFFF";
+  ctx.font = `${16 * view.scale}px sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(String(clamp(1, Math.round(defaults.towerHealth), 5)), p.x, p.y);
+  ctx.globalAlpha = 1.0;
 }
 
 function drawOctagon(cx, cy, r) {
@@ -1455,7 +1723,7 @@ function drawWallDraft() {
   const start = worldToScreen(startTower.x, startTower.y);
   const end = worldToScreen(endWorld.x, endWorld.y);
   const ratio = length / GAME.WALL_MAX_LENGTH;
-  let color = getTeamColor(defaults.defaultTeam);
+  let color = getTeamColor(startTower.team_id);
   if (ratio > 0.95) color = COLORS.warn;
   if (ratio > 1) color = COLORS.danger;
   const width = 32 * view.scale;
@@ -1468,7 +1736,6 @@ function drawWallDraft() {
   ctx.lineTo(end.x, end.y);
   ctx.stroke();
   ctx.globalAlpha = 1.0;
-  if (length > GAME.WALL_MAX_LENGTH) setActionState(`Wall exceeds max length (${Math.round(length)})`, "error");
 }
 
 function drawBoxSelection() {
@@ -1547,10 +1814,18 @@ function validateForExport() {
   for (const wall of state.walls) {
     if (wall.t1 === wall.t2) return "Validation error: wall cannot connect a tower to itself.";
     if (!ids.has(wall.t1) || !ids.has(wall.t2)) return "Validation error: wall references a missing tower id.";
+    const a = getTowerById(wall.t1);
+    const b = getTowerById(wall.t2);
+    if (!a || !b) return "Validation error: wall references a missing tower id.";
+    if (a.team_id !== b.team_id || wall.team_id !== a.team_id) {
+      return "Validation error: every wall and its connected towers must share the same team color.";
+    }
     const key = `${Math.min(wall.t1, wall.t2)}:${Math.max(wall.t1, wall.t2)}`;
     if (seen.has(key)) return "Validation error: duplicate wall between two towers.";
     seen.add(key);
   }
+  if (findWallOverlap()) return "Validation error: walls cannot overlap or intersect.";
+  if (hasTowerOnWallConflict()) return "Validation error: a tower overlaps an existing wall.";
   return null;
 }
 
@@ -1636,6 +1911,16 @@ function parseImportedState(data) {
     if (wallSeen.has(key)) throw new Error("Duplicate wall connection found.");
     wallSeen.add(key);
   });
+  imported.walls.forEach((wall) => {
+    const a = getTowerByIdFrom(imported, wall.t1);
+    const b = getTowerByIdFrom(imported, wall.t2);
+    if (!a || !b) throw new Error("Wall references a missing tower id.");
+    if (a.team_id !== b.team_id || wall.team_id !== a.team_id) {
+      throw new Error("Every wall and its connected towers must share the same team color.");
+    }
+  });
+  if (findWallOverlap(null, imported)) throw new Error("Walls cannot overlap or intersect.");
+  if (hasTowerOnWallConflict(null, imported)) throw new Error("A tower overlaps an existing wall.");
 
   return imported;
 }
@@ -1971,6 +2256,136 @@ function pointToSegmentDistance(point, a, b) {
   const px = a.x + t * dx;
   const py = a.y + t * dy;
   return distance(point.x, point.y, px, py);
+}
+
+function getTowerByIdFrom(mapState, id) {
+  return mapState.towers.find((tower) => tower.id === id) || null;
+}
+
+function getTowerPoint(id, overrides = null, mapState = state) {
+  if (overrides && overrides.has(id)) return overrides.get(id);
+  const tower = getTowerByIdFrom(mapState, id);
+  if (!tower) return null;
+  return { x: tower.x, y: tower.y };
+}
+
+function hasTowerOverlapAt(x, y, ignoreTowerId = null, mapState = state) {
+  const minDist = GAME.TOWER_DIAMETER - 0.001;
+  for (const tower of mapState.towers) {
+    if (ignoreTowerId != null && tower.id === ignoreTowerId) continue;
+    if (distance(x, y, tower.x, tower.y) < minDist) return true;
+  }
+  return false;
+}
+
+function isTowerPositionOnWall(x, y, ignoreTowerId = null, overrides = null, mapState = state) {
+  const clearance = (GAME.TOWER_DIAMETER / 2) - 0.001;
+  for (const wall of mapState.walls) {
+    if (ignoreTowerId != null && (wall.t1 === ignoreTowerId || wall.t2 === ignoreTowerId)) continue;
+    const a = getTowerPoint(wall.t1, overrides, mapState);
+    const b = getTowerPoint(wall.t2, overrides, mapState);
+    if (!a || !b) continue;
+    if (pointToSegmentDistance({ x, y }, a, b) <= clearance) return true;
+  }
+  return false;
+}
+
+function hasTowerOnWallConflict(overrides = null, mapState = state) {
+  for (const tower of mapState.towers) {
+    const p = getTowerPoint(tower.id, overrides, mapState);
+    if (!p) continue;
+    if (isTowerPositionOnWall(p.x, p.y, tower.id, overrides, mapState)) return true;
+  }
+  return false;
+}
+
+function findWallOverlap(overrides = null, mapState = state) {
+  for (let i = 0; i < mapState.walls.length; i += 1) {
+    const wa = mapState.walls[i];
+    const a1 = getTowerPoint(wa.t1, overrides, mapState);
+    const a2 = getTowerPoint(wa.t2, overrides, mapState);
+    if (!a1 || !a2) continue;
+    for (let j = i + 1; j < mapState.walls.length; j += 1) {
+      const wb = mapState.walls[j];
+      const b1 = getTowerPoint(wb.t1, overrides, mapState);
+      const b2 = getTowerPoint(wb.t2, overrides, mapState);
+      if (!b1 || !b2) continue;
+      if (wallsConflict(a1, a2, wa.t1, wa.t2, b1, b2, wb.t1, wb.t2)) return { wallA: wa, wallB: wb };
+    }
+  }
+  return null;
+}
+
+function findWallOverlapForSegment(startPoint, endPoint, startTowerId, endTowerId, mapState = state, excludeWallUid = null) {
+  for (const wall of mapState.walls) {
+    if (excludeWallUid && wall.uid === excludeWallUid) continue;
+    const b1 = getTowerPoint(wall.t1, null, mapState);
+    const b2 = getTowerPoint(wall.t2, null, mapState);
+    if (!b1 || !b2) continue;
+    if (wallsConflict(startPoint, endPoint, startTowerId, endTowerId, b1, b2, wall.t1, wall.t2)) return wall;
+  }
+  return null;
+}
+
+function wallsConflict(a1, a2, aT1, aT2, b1, b2, bT1, bT2) {
+  if (!segmentsIntersectOrTouch(a1, a2, b1, b2)) return false;
+  const shared = [];
+  if (aT1 != null && (aT1 === bT1 || aT1 === bT2)) shared.push(aT1);
+  if (aT2 != null && (aT2 === bT1 || aT2 === bT2) && !shared.includes(aT2)) shared.push(aT2);
+  if (!shared.length) return true;
+
+  const collinear = isCollinear(a1, a2, b1) && isCollinear(a1, a2, b2);
+  if (!collinear) return false;
+  if (shared.length > 1) return true;
+
+  const sharedId = shared[0];
+  const aShared = aT1 === sharedId ? a1 : a2;
+  const aOther = aT1 === sharedId ? a2 : a1;
+  const bShared = bT1 === sharedId ? b1 : b2;
+  const bOther = bT1 === sharedId ? b2 : b1;
+  if (!nearlyEqualPoint(aShared, bShared)) return true;
+
+  const v1x = aOther.x - aShared.x;
+  const v1y = aOther.y - aShared.y;
+  const v2x = bOther.x - bShared.x;
+  const v2y = bOther.y - bShared.y;
+  const dot = v1x * v2x + v1y * v2y;
+  return dot > 0.0001;
+}
+
+function segmentsIntersectOrTouch(p1, q1, p2, q2) {
+  const o1 = orientation(p1, q1, p2);
+  const o2 = orientation(p1, q1, q2);
+  const o3 = orientation(p2, q2, p1);
+  const o4 = orientation(p2, q2, q1);
+
+  if (o1 !== o2 && o3 !== o4) return true;
+  if (o1 === 0 && onSegment(p1, p2, q1)) return true;
+  if (o2 === 0 && onSegment(p1, q2, q1)) return true;
+  if (o3 === 0 && onSegment(p2, p1, q2)) return true;
+  if (o4 === 0 && onSegment(p2, q1, q2)) return true;
+  return false;
+}
+
+function isCollinear(a, b, c) {
+  return Math.abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)) <= 0.0001;
+}
+
+function orientation(a, b, c) {
+  const val = (b.y - a.y) * (c.x - b.x) - (b.x - a.x) * (c.y - b.y);
+  if (Math.abs(val) <= 0.0001) return 0;
+  return val > 0 ? 1 : 2;
+}
+
+function onSegment(a, b, c) {
+  return b.x <= Math.max(a.x, c.x) + 0.0001
+    && b.x + 0.0001 >= Math.min(a.x, c.x)
+    && b.y <= Math.max(a.y, c.y) + 0.0001
+    && b.y + 0.0001 >= Math.min(a.y, c.y);
+}
+
+function nearlyEqualPoint(a, b) {
+  return Math.abs(a.x - b.x) <= 0.0001 && Math.abs(a.y - b.y) <= 0.0001;
 }
 
 function clipLineToMaxLength(ax, ay, bx, by, maxLength) {

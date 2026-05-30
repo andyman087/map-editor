@@ -25,8 +25,7 @@
           <button class="tool-button" data-tool="boundary">Draw Boundary</button>
           <button class="tool-button" data-tool="spawn">Place Spawn</button>
           <button class="tool-button" data-tool="bomb">Place Bomb Site</button>
-          <button class="tool-button" data-tool="tower">Place Tower</button>
-          <button class="tool-button" data-tool="wall">Connect Walls</button>
+          <button class="tool-button" data-tool="build">Build</button>
         </div>
       </section>
 
@@ -72,6 +71,10 @@
           <span>object_snapping_strength</span>
           <input type="number" id="snapStrengthInput" value="20" step="1" min="1">
         </label>
+        <label class="checkbox-field">
+          <input type="checkbox" id="buildSnapEnabledInput" checked>
+          <span>Build mode object snapping</span>
+        </label>
 
         <button id="exportBtn" class="action-button">Export to JSON</button>
         <button id="importBtn" class="action-button secondary">Import JSON</button>
@@ -91,6 +94,7 @@
         <h2>Quick Help</h2>
         <ul class="tips">
           <li>Left click to use current tool.</li>
+          <li>Use Build to place towers and auto-connect walls.</li>
           <li>Right click or middle click and drag to pan.</li>
           <li>Shift/Ctrl/Cmd + click to multi-select in Select / Move.</li>
           <li>Mouse wheel to zoom at cursor.</li>
