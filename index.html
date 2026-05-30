@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Top-Down Shooter Map Editor</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar left-sidebar">
+      <div class="sidebar-header">
+        <div>
+          <h1>Map Editor</h1>
+        </div>
+        <button id="settingsToggleBtn" class="settings-toggle" title="Settings" aria-label="Open settings">
+          &#9881;
+        </button>
+      </div>
+
+      <section class="panel">
+        <h2>Tools</h2>
+        <div class="tool-grid">
+          <button class="tool-button active" data-tool="select">Select / Move</button>
+          <button class="tool-button" data-tool="boundary">Draw Boundary</button>
+          <button class="tool-button" data-tool="spawn">Place Spawn</button>
+          <button class="tool-button" data-tool="bomb">Place Bomb Site</button>
+          <button class="tool-button" data-tool="tower">Place Tower</button>
+          <button class="tool-button" data-tool="wall">Connect Walls</button>
+        </div>
+      </section>
+
+      <section class="panel default-panel">
+        <h2>Defaults</h2>
+        <label class="field">
+          <span>Selected Color</span>
+        </label>
+        <div class="team-swatches" id="teamSwatches">
+          <button class="team-swatch active blue" data-team="0" title="Team Blue"></button>
+          <button class="team-swatch red" data-team="1" title="Team Red"></button>
+          <button class="team-swatch neutral" data-team="-1" title="None / Neutral"></button>
+        </div>
+
+        <label class="field">
+          <span>Tower health</span>
+          <input type="number" id="towerHealthInput" value="5" step="1">
+        </label>
+
+        <label class="checkbox-field">
+          <input type="checkbox" id="towerInvincibleInput">
+          <span>Tower is_invincible</span>
+        </label>
+
+        <div id="actionState" class="action-state idle">Idle</div>
+      </section>
+    </aside>
+
+    <main class="workspace">
+      <canvas id="mapCanvas" aria-label="Map editing canvas"></canvas>
+      <div class="workspace-overlay">Scroll to zoom | Right/Middle drag to pan</div>
+      <section id="settingsPanel" class="panel settings-panel hidden">
+        <div class="settings-panel-header">
+          <h2>Settings</h2>
+          <button id="settingsCloseBtn" class="settings-close" aria-label="Close settings">x</button>
+        </div>
+        <label class="field">
+          <span>spawn_protection_size</span>
+          <input type="number" id="spawnProtectionInput" value="500" step="0.1">
+        </label>
+
+        <label class="field">
+          <span>object_snapping_strength</span>
+          <input type="number" id="snapStrengthInput" value="20" step="1" min="1">
+        </label>
+
+        <button id="exportBtn" class="action-button">Export to JSON</button>
+        <button id="importBtn" class="action-button secondary">Import JSON</button>
+        <input type="file" id="importFileInput" accept=".json,application/json" hidden>
+      </section>
+    </main>
+
+    <aside class="sidebar right-sidebar">
+      <section class="panel">
+        <h2>Selection</h2>
+        <div id="selectionPanel" class="selection-panel">
+          <p class="muted">No selection yet.</p>
+        </div>
+      </section>
+
+      <section class="panel quick-help-panel">
+        <h2>Quick Help</h2>
+        <ul class="tips">
+          <li>Left click to use current tool.</li>
+          <li>Right click or middle click and drag to pan.</li>
+          <li>Shift/Ctrl/Cmd + click to multi-select in Select / Move.</li>
+          <li>Mouse wheel to zoom at cursor.</li>
+        </ul>
+      </section>
+    </aside>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
