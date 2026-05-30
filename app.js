@@ -416,13 +416,18 @@ function handleSelectDown(event, world) {
   const hit = hitTest(world);
   const multiModifier = event.shiftKey || event.ctrlKey || event.metaKey;
   if (!hit) {
-    if (selection.size === 0) {
-      interaction.boxSelect = { start: { ...world }, end: { ...world } };
-      setActionState("Drag to create selection box", "idle");
-      requestRender();
-      return;
+    interaction.boxSelect = {
+      start: { ...world },
+      end: { ...world },
+      additive: multiModifier,
+      baseSelection: multiModifier ? Array.from(selection) : [],
+    };
+    if (!multiModifier) {
+      selection.clear();
+      renderSelectionPanel();
     }
-    if (!multiModifier) clearSelection();
+    setActionState("Drag to create selection box", "idle");
+    requestRender();
     return;
   }
   const key = hit.key;
@@ -564,12 +569,14 @@ function finishBoxSelection() {
   const maxX = Math.max(box.start.x, box.end.x);
   const minY = Math.min(box.start.y, box.end.y);
   const maxY = Math.max(box.start.y, box.end.y);
-  selection.clear();
+  const nextSelection = new Set(box.additive ? (box.baseSelection || []) : []);
   getSelectableEntries().forEach((entry) => {
     const c = getEntryCenter(entry);
     if (!c) return;
-    if (c.x >= minX && c.x <= maxX && c.y >= minY && c.y <= maxY) selection.add(entry.key);
+    if (c.x >= minX && c.x <= maxX && c.y >= minY && c.y <= maxY) nextSelection.add(entry.key);
   });
+  selection.clear();
+  nextSelection.forEach((key) => selection.add(key));
   renderSelectionPanel();
   setActionState(selection.size ? `Selected ${selection.size} item(s)` : "Selection box found no entities", selection.size ? "success" : "idle", true);
 }
@@ -626,17 +633,14 @@ function placeTower(world) {
   withAction("PLACE_TOWER", () => {
     let x = roundTo(world.x, 3);
     let y = roundTo(world.y, 3);
-    let clipped = false;
     const prev = interaction.towerChainLastId != null ? getTowerById(interaction.towerChainLastId) : null;
     if (prev) {
       const dx = x - prev.x;
       const dy = y - prev.y;
       const dist = Math.hypot(dx, dy);
       if (dist > GAME.WALL_MAX_LENGTH) {
-        const ratio = GAME.WALL_MAX_LENGTH / dist;
-        x = roundTo(prev.x + dx * ratio, 3);
-        y = roundTo(prev.y + dy * ratio, 3);
-        clipped = true;
+        setActionState(`Wall too long (${Math.round(dist)}), max ${GAME.WALL_MAX_LENGTH}`, "error", true);
+        return false;
       }
     }
     if (!isPlacementInsideBoundary("tower", x, y)) {
@@ -662,7 +666,7 @@ function placeTower(world) {
     interaction.towerChainLastId = tower.id;
     selection.clear();
     selection.add(makeKey("tower", tower.uid));
-    setActionState(clipped ? `Tower clipped to ${GAME.WALL_MAX_LENGTH}` : "Tower placed", clipped ? "warn" : "success", true);
+    setActionState("Tower placed", "success", true);
     return true;
   });
   renderSelectionPanel();
@@ -1368,11 +1372,15 @@ function drawTowerChainGhostWall() {
   const rawTarget = hoveredTower && hoveredTower.id !== startTower.id
     ? { x: hoveredTower.x, y: hoveredTower.y }
     : { x: interaction.mouseWorld.x, y: interaction.mouseWorld.y };
+  const length = distance(startTower.x, startTower.y, rawTarget.x, rawTarget.y);
+  const ratio = length / GAME.WALL_MAX_LENGTH;
+  let color = getTeamColor(defaults.defaultTeam);
+  if (ratio > 0.95) color = COLORS.warn;
+  if (ratio > 1) color = COLORS.danger;
   const endWorld = clipLineToMaxLength(startTower.x, startTower.y, rawTarget.x, rawTarget.y, GAME.WALL_MAX_LENGTH);
 
   const start = worldToScreen(startTower.x, startTower.y);
   const end = worldToScreen(endWorld.x, endWorld.y);
-  const color = getTeamColor(defaults.defaultTeam);
 
   ctx.lineCap = "round";
   ctx.lineWidth = 32 * view.scale;
@@ -1383,6 +1391,7 @@ function drawTowerChainGhostWall() {
   ctx.lineTo(end.x, end.y);
   ctx.stroke();
   ctx.globalAlpha = 1.0;
+  if (length > GAME.WALL_MAX_LENGTH) setActionState(`Wall exceeds max length (${Math.round(length)})`, "error");
 }
 
 function drawOctagon(cx, cy, r) {
