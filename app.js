@@ -2403,43 +2403,11 @@ function clipLineToMaxLength(ax, ay, bx, by, maxLength) {
 function createInitialState() {
   return {
     spawn_protection_size: 500,
-    map_boundaries: [
-      { uid: "boundary_1", x: 140, y: 180 },
-      { uid: "boundary_2", x: 3240, y: 180 },
-      { uid: "boundary_3", x: 3560, y: 620 },
-      { uid: "boundary_4", x: 3480, y: 1820 },
-      { uid: "boundary_5", x: 2920, y: 2260 },
-      { uid: "boundary_6", x: 1420, y: 2440 },
-      { uid: "boundary_7", x: 260, y: 2150 },
-      { uid: "boundary_8", x: 80, y: 1060 },
-    ],
-    spawn_points: [
-      { uid: "spawn_1", team_id: 0, x: 300, y: 1200 },
-      { uid: "spawn_2", team_id: 1, x: 3220, y: 1210 },
-    ],
-    bomb_sites: [
-      { uid: "bomb_1", site_letter: "A", x: 820, y: 640 },
-      { uid: "bomb_2", site_letter: "B", x: 2550, y: 640 },
-      { uid: "bomb_3", site_letter: "C", x: 880, y: 1900 },
-    ],
-    towers: [
-      { uid: "tower_1", id: 1, team_id: 0, x: 1180, y: 1080, health: 5, is_invincible: false },
-      { uid: "tower_2", id: 2, team_id: 0, x: 1580, y: 900, health: 5, is_invincible: false },
-      { uid: "tower_3", id: 3, team_id: 0, x: 2060, y: 1180, health: 5, is_invincible: false },
-      { uid: "tower_4", id: 4, team_id: 0, x: 1660, y: 1520, health: 5, is_invincible: false },
-      { uid: "tower_5", id: 5, team_id: 0, x: 830, y: 560, health: 5, is_invincible: false },
-      { uid: "tower_6", id: 6, team_id: 0, x: 2590, y: 560, health: 5, is_invincible: false },
-      { uid: "tower_7", id: 7, team_id: 0, x: 900, y: 1820, health: 5, is_invincible: false },
-      { uid: "tower_8", id: 8, team_id: 1, x: 3000, y: 1580, health: 5, is_invincible: false },
-    ],
-    walls: [
-      { uid: "wall_1", id: 1, t1: 1, t2: 2, team_id: 0 },
-      { uid: "wall_2", id: 2, t1: 2, t2: 3, team_id: 0 },
-      { uid: "wall_3", id: 3, t1: 3, t2: 4, team_id: 0 },
-      { uid: "wall_4", id: 4, t1: 4, t2: 1, team_id: 0 },
-    ],
-    structures: [
-      { uid: "structure_1", id: 1, x: 2840, y: 1720, size: 140, label: "BLOCK", color: COLORS.red, team_id: 1 },
-    ],
+    map_boundaries: [],
+    spawn_points: [],
+    bomb_sites: [],
+    towers: [],
+    walls: [],
+    structures: [],
   };
 }
