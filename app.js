@@ -86,6 +86,7 @@ const interaction = {
   wallDraft: null,
   hoverTowerId: null,
   buildGhost: null,
+  placementGhost: null,
   towerDraftWarnActive: false,
   wallDraftWarnActive: false,
   snapEnabled: true,
@@ -223,6 +224,7 @@ function setMode(mode) {
   interaction.drag = null;
   interaction.boxSelect = null;
   interaction.buildGhost = null;
+  interaction.placementGhost = null;
   interaction.guides = { x: null, y: null, xPoints: [], yPoints: [] };
   interaction.towerDraftWarnActive = false;
   interaction.wallDraftWarnActive = false;
@@ -279,8 +281,11 @@ function onMouseDown(event) {
     return;
   }
   if (interaction.mode === "boundary") {
+    const target = interaction.placementGhost && interaction.placementGhost.type === "boundary"
+      ? interaction.placementGhost
+      : getBoundaryPlacementPreview(world);
     withAction("ADD_BOUNDARY_POINT", () => {
-      state.map_boundaries.push({ uid: createUid("boundary"), x: roundTo(world.x, 3), y: roundTo(world.y, 3) });
+      state.map_boundaries.push({ uid: createUid("boundary"), x: roundTo(target.x, 3), y: roundTo(target.y, 3) });
       return true;
     });
     setActionState("Boundary vertex added", "success", true);
@@ -332,7 +337,39 @@ function onMouseMove(event) {
     interaction.hoverTowerId = hover ? hover.id : null;
     const startTower = getAutoWallStartTower();
     const preview = getBuildPlacementPreview(world, startTower);
-    interaction.buildGhost = { x: preview.x, y: preview.y };
+    interaction.buildGhost = { x: preview.x, y: preview.y, invalid: !isPlacementInsideBoundary("tower", preview.x, preview.y) };
+    interaction.placementGhost = null;
+    interaction.guides = {
+      x: preview.guideX,
+      y: preview.guideY,
+      xPoints: preview.xPoints,
+      yPoints: preview.yPoints,
+    };
+    requestRender();
+  } else if (interaction.mode === "spawn") {
+    interaction.buildGhost = null;
+    interaction.placementGhost = {
+      type: "spawn",
+      x: world.x,
+      y: world.y,
+      invalid: !isPlacementInsideBoundary("spawn", world.x, world.y),
+    };
+    interaction.guides = { x: null, y: null, xPoints: [], yPoints: [] };
+    requestRender();
+  } else if (interaction.mode === "bomb") {
+    interaction.buildGhost = null;
+    interaction.placementGhost = {
+      type: "bomb",
+      x: world.x,
+      y: world.y,
+      invalid: !isPlacementInsideBoundary("bomb", world.x, world.y),
+    };
+    interaction.guides = { x: null, y: null, xPoints: [], yPoints: [] };
+    requestRender();
+  } else if (interaction.mode === "boundary") {
+    interaction.buildGhost = null;
+    const preview = getBoundaryPlacementPreview(world);
+    interaction.placementGhost = { type: "boundary", x: preview.x, y: preview.y, invalid: false };
     interaction.guides = {
       x: preview.guideX,
       y: preview.guideY,
@@ -341,6 +378,8 @@ function onMouseMove(event) {
     };
     requestRender();
   } else if (!interaction.drag) {
+    interaction.buildGhost = null;
+    interaction.placementGhost = null;
     interaction.guides = { x: null, y: null, xPoints: [], yPoints: [] };
   }
   updateDraftLengthWarnings();
@@ -682,7 +721,10 @@ function finishBoxSelection() {
 }
 
 function placeSpawn(world) {
-  if (!isPlacementInsideBoundary("spawn", world.x, world.y)) {
+  const target = interaction.placementGhost && interaction.placementGhost.type === "spawn"
+    ? interaction.placementGhost
+    : { x: world.x, y: world.y };
+  if (!isPlacementInsideBoundary("spawn", target.x, target.y)) {
     setActionState("Cannot place spawn outside map boundary.", "warn", true);
     return;
   }
@@ -693,13 +735,13 @@ function placeSpawn(world) {
   withAction("PLACE_SPAWN", () => {
     const existing = state.spawn_points.find((point) => point.team_id === defaults.defaultTeam);
     if (existing) {
-      existing.x = roundTo(world.x, 3);
-      existing.y = roundTo(world.y, 3);
+      existing.x = roundTo(target.x, 3);
+      existing.y = roundTo(target.y, 3);
       selection.clear();
       selection.add(makeKey("spawn", existing.uid));
       return true;
     }
-    const spawn = { uid: createUid("spawn"), team_id: defaults.defaultTeam, x: roundTo(world.x, 3), y: roundTo(world.y, 3) };
+    const spawn = { uid: createUid("spawn"), team_id: defaults.defaultTeam, x: roundTo(target.x, 3), y: roundTo(target.y, 3) };
     state.spawn_points.push(spawn);
     selection.clear();
     selection.add(makeKey("spawn", spawn.uid));
@@ -710,12 +752,15 @@ function placeSpawn(world) {
 }
 
 function placeBomb(world) {
-  if (!isPlacementInsideBoundary("bomb", world.x, world.y)) {
+  const target = interaction.placementGhost && interaction.placementGhost.type === "bomb"
+    ? interaction.placementGhost
+    : { x: world.x, y: world.y };
+  if (!isPlacementInsideBoundary("bomb", target.x, target.y)) {
     setActionState("Cannot place bomb site outside map boundary.", "warn", true);
     return;
   }
   withAction("PLACE_BOMB", () => {
-    const site = { uid: createUid("bomb"), site_letter: nextBombSiteLetter(), x: roundTo(world.x, 3), y: roundTo(world.y, 3) };
+    const site = { uid: createUid("bomb"), site_letter: nextBombSiteLetter(), x: roundTo(target.x, 3), y: roundTo(target.y, 3) };
     state.bomb_sites.push(site);
     selection.clear();
     selection.add(makeKey("bomb", site.uid));
@@ -726,12 +771,9 @@ function placeBomb(world) {
 }
 
 function placeTower(world) {
-  if (!isPlacementInsideBoundary("tower", world.x, world.y)) {
-    setActionState("Cannot place tower outside map boundary.", "warn", true);
-    return;
-  }
   const startTower = getAutoWallStartTower();
-  const targetTower = hitTower(world);
+  const buildTarget = getBuildPlacementTarget(world, startTower);
+  const targetTower = hitTower(world) || hitTower(buildTarget);
 
   if (startTower && targetTower) {
     if (targetTower.id === startTower.id) {
@@ -780,7 +822,6 @@ function placeTower(world) {
 
   withAction("PLACE_TOWER", () => {
     const startTower = getAutoWallStartTower();
-    const buildTarget = getBuildPlacementTarget(world, startTower);
     let x = roundTo(buildTarget.x, 3);
     let y = roundTo(buildTarget.y, 3);
     const teamId = startTower ? startTower.team_id : defaults.defaultTeam;
@@ -922,6 +963,29 @@ function getBuildPlacementPreview(world, startTower = null) {
   const exclude = new Set();
   if (startTower) exclude.add(makeKey("tower", startTower.uid));
   return getSnapResult(world.x, world.y, exclude);
+}
+
+function getBoundaryPlacementPreview(world) {
+  const candidates = state.map_boundaries.map((point) => ({ x: point.x, y: point.y }));
+  const threshold = editorSettings.snapStrength / Math.max(view.scale, 0.0001);
+  let bestX = null;
+  let bestY = null;
+  candidates.forEach((candidate) => {
+    const dx = Math.abs(candidate.x - world.x);
+    const dy = Math.abs(candidate.y - world.y);
+    if (dx <= threshold && (!bestX || dx < bestX.delta)) bestX = { value: candidate.x, delta: dx };
+    if (dy <= threshold && (!bestY || dy < bestY.delta)) bestY = { value: candidate.y, delta: dy };
+  });
+  const x = bestX ? bestX.value : world.x;
+  const y = bestY ? bestY.value : world.y;
+  return {
+    x,
+    y,
+    guideX: bestX ? x : null,
+    guideY: bestY ? y : null,
+    xPoints: bestX ? candidates.filter((candidate) => Math.abs(candidate.x - x) <= 0.001) : [],
+    yPoints: bestY ? candidates.filter((candidate) => Math.abs(candidate.y - y) <= 0.001) : [],
+  };
 }
 
 function getSnapResult(targetX, targetY, excludeKeys) {
@@ -1376,6 +1440,7 @@ function onStateReplaced() {
   interaction.wallDraft = null;
   interaction.hoverTowerId = null;
   interaction.buildGhost = null;
+  interaction.placementGhost = null;
   interaction.towerDraftWarnActive = false;
   interaction.wallDraftWarnActive = false;
   interaction.drag = null;
@@ -1404,6 +1469,7 @@ function draw() {
   drawSpawns();
   drawTowers();
   drawBuildGhostTower();
+  drawPlacementGhost();
   drawGuides();
   drawWallDraft();
   drawBoxSelection();
@@ -1615,9 +1681,11 @@ function drawTowerChainGhostWall() {
     : snappedTarget;
   const length = distance(startTower.x, startTower.y, rawTarget.x, rawTarget.y);
   const ratio = length / GAME.WALL_MAX_LENGTH;
+  const outsideBoundary = hoveredTower ? false : !isPlacementInsideBoundary("tower", rawTarget.x, rawTarget.y);
   let color = getTeamColor(startTower.team_id);
   if (ratio > 0.95) color = COLORS.warn;
   if (ratio > 1) color = COLORS.danger;
+  if (outsideBoundary) color = COLORS.danger;
   const endWorld = clipLineToMaxLength(startTower.x, startTower.y, rawTarget.x, rawTarget.y, GAME.WALL_MAX_LENGTH);
 
   const start = worldToScreen(startTower.x, startTower.y);
@@ -1642,9 +1710,10 @@ function drawBuildGhostTower() {
 
   const p = worldToScreen(ghost.x, ghost.y);
   const teamId = startTower ? startTower.team_id : defaults.defaultTeam;
-  const color = getTeamColor(teamId);
+  const invalid = Boolean(ghost.invalid) || !isPlacementInsideBoundary("tower", ghost.x, ghost.y);
+  const color = invalid ? COLORS.danger : getTeamColor(teamId);
 
-  ctx.globalAlpha = 0.35;
+  ctx.globalAlpha = invalid ? 0.45 : 0.35;
   ctx.beginPath();
   ctx.arc(p.x, p.y, 44 * view.scale, 0, Math.PI * 2);
   ctx.lineWidth = 8 * view.scale;
@@ -1660,6 +1729,84 @@ function drawBuildGhostTower() {
   ctx.textBaseline = "middle";
   ctx.fillText(String(clamp(1, Math.round(defaults.towerHealth), 5)), p.x, p.y);
   ctx.globalAlpha = 1.0;
+}
+
+function drawPlacementGhost() {
+  const ghost = interaction.placementGhost;
+  if (!ghost) return;
+  if (ghost.type === "spawn") {
+    drawSpawnGhost(ghost);
+  } else if (ghost.type === "bomb") {
+    drawBombGhost(ghost);
+  } else if (ghost.type === "boundary") {
+    drawBoundaryGhost(ghost);
+  }
+}
+
+function drawSpawnGhost(ghost) {
+  const p = worldToScreen(ghost.x, ghost.y);
+  const spawnSize = Math.max(1, Number(state.spawn_protection_size) || 500);
+  const size = spawnSize * view.scale;
+  const half = size / 2;
+  const color = ghost.invalid ? COLORS.danger : getTeamColor(defaults.defaultTeam);
+
+  ctx.lineWidth = 4 * view.scale;
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.globalAlpha = ghost.invalid ? 0.35 : 0.22;
+  ctx.fillRect(p.x - half, p.y - half, size, size);
+  ctx.globalAlpha = 0.9;
+  ctx.strokeRect(p.x - half, p.y - half, size, size);
+
+  const iconSize = 20 * view.scale;
+  const iconHalf = iconSize / 2;
+  ctx.globalAlpha = ghost.invalid ? 0.75 : 0.9;
+  ctx.fillRect(p.x - iconHalf, p.y - iconHalf, iconSize, iconSize);
+  ctx.globalAlpha = 1.0;
+}
+
+function drawBombGhost(ghost) {
+  const p = worldToScreen(ghost.x, ghost.y);
+  const radius = 250 * view.scale;
+  const stroke = ghost.invalid ? withAlpha(COLORS.danger, 0.85) : "rgba(51, 127, 229, 0.8)";
+  const fill = ghost.invalid ? withAlpha(COLORS.danger, 0.2) : "rgba(51, 127, 229, 0.15)";
+
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+  ctx.lineWidth = 8 * view.scale;
+  ctx.strokeStyle = stroke;
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = "#FFFFFF";
+  ctx.font = `bold ${72 * view.scale}px sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.globalAlpha = 0.85;
+  ctx.fillText(nextBombSiteLetter(), p.x, p.y);
+  ctx.globalAlpha = 1.0;
+}
+
+function drawBoundaryGhost(ghost) {
+  const p = worldToScreen(ghost.x, ghost.y);
+  const last = state.map_boundaries[state.map_boundaries.length - 1];
+  if (last) {
+    const s = worldToScreen(last.x, last.y);
+    ctx.strokeStyle = withAlpha(COLORS.guide, 0.65);
+    ctx.lineWidth = 2 * view.scale;
+    ctx.beginPath();
+    ctx.moveTo(s.x, s.y);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+  }
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+  ctx.fillStyle = withAlpha(COLORS.guide, 0.82);
+  ctx.fill();
+  ctx.strokeStyle = "#FFFFFF";
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
 }
 
 function drawOctagon(cx, cy, r) {
