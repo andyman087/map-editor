@@ -55,6 +55,7 @@ let wallLocalIdSeed = 1;
 let structureIdSeed = 1;
 let needsRender = true;
 let actionTimer = null;
+let invalidObjectWarningCount = 0;
 
 let state = createInitialState();
 const selection = new Set();
@@ -87,6 +88,7 @@ const interaction = {
   hoverTowerId: null,
   buildGhost: null,
   placementGhost: null,
+  snapTemporarilyDisabled: false,
   towerDraftWarnActive: false,
   wallDraftWarnActive: false,
   snapEnabled: true,
@@ -174,6 +176,7 @@ function bindUI() {
   window.addEventListener("mouseup", onMouseUp);
   canvas.addEventListener("wheel", onWheel, { passive: false });
   window.addEventListener("keydown", onKeyDown);
+  window.addEventListener("keyup", onKeyUp);
   document.addEventListener("mousedown", onDocumentMouseDown);
 }
 
@@ -444,6 +447,34 @@ function updateDraftLengthWarnings() {
   }
 }
 
+function refreshPlacementPreviewFromMouse() {
+  const world = interaction.mouseWorld;
+  if (interaction.mode === "build") {
+    const hover = hitTower(world);
+    interaction.hoverTowerId = hover ? hover.id : null;
+    const startTower = getAutoWallStartTower();
+    const preview = getBuildPlacementPreview(world, startTower);
+    interaction.buildGhost = { x: preview.x, y: preview.y, invalid: !isPlacementInsideBoundary("tower", preview.x, preview.y) };
+    interaction.placementGhost = null;
+    interaction.guides = {
+      x: preview.guideX,
+      y: preview.guideY,
+      xPoints: preview.xPoints,
+      yPoints: preview.yPoints,
+    };
+  } else if (interaction.mode === "boundary") {
+    interaction.buildGhost = null;
+    const preview = getBoundaryPlacementPreview(world);
+    interaction.placementGhost = { type: "boundary", x: preview.x, y: preview.y, invalid: false };
+    interaction.guides = {
+      x: preview.guideX,
+      y: preview.guideY,
+      xPoints: preview.xPoints,
+      yPoints: preview.yPoints,
+    };
+  }
+}
+
 function onMouseUp() {
   interaction.isPanning = false;
   interaction.panStartMouse = null;
@@ -472,6 +503,11 @@ function onWheel(event) {
 function onKeyDown(event) {
   const key = event.key.toLowerCase();
   const mod = event.ctrlKey || event.metaKey;
+  interaction.snapTemporarilyDisabled = event.ctrlKey;
+  if (interaction.mode === "build" || interaction.mode === "boundary") {
+    refreshPlacementPreviewFromMouse();
+    requestRender();
+  }
 
   if (mod && !event.shiftKey && key === "z") {
     event.preventDefault();
@@ -501,6 +537,14 @@ function onKeyDown(event) {
   }
 }
 
+function onKeyUp(event) {
+  interaction.snapTemporarilyDisabled = event.ctrlKey;
+  if (interaction.mode === "build" || interaction.mode === "boundary") {
+    refreshPlacementPreviewFromMouse();
+    requestRender();
+  }
+}
+
 function isTypingInFormControl() {
   const active = document.activeElement;
   if (!active) return false;
@@ -517,6 +561,7 @@ function updateMousePosition(event) {
   interaction.mouseScreen.x = event.clientX - rect.left;
   interaction.mouseScreen.y = event.clientY - rect.top;
   interaction.mouseWorld = screenToWorld(interaction.mouseScreen.x, interaction.mouseScreen.y);
+  interaction.snapTemporarilyDisabled = Boolean(event.ctrlKey);
 }
 
 function screenToWorld(screenX, screenY) {
@@ -598,7 +643,7 @@ function applyDrag(world) {
   const rawDy = world.y - drag.startMouse.y;
   const targetX = anchorStart.x + rawDx;
   const targetY = anchorStart.y + rawDy;
-  const snap = interaction.snapEnabled
+  const snap = interaction.snapEnabled && !interaction.snapTemporarilyDisabled
     ? getSnapResult(targetX, targetY, new Set(drag.keys))
     : { x: targetX, y: targetY, guideX: null, guideY: null, xPoints: [], yPoints: [] };
   let dx = snap.x - anchorStart.x;
@@ -698,6 +743,7 @@ function finishDrag() {
   if (!drag || !drag.moved) return;
   pushHistory("MOVE_MULTI", drag.beforeState, cloneState(state));
   renderSelectionPanel();
+  updateInvalidObjectWarning();
 }
 
 function finishBoxSelection() {
@@ -776,6 +822,10 @@ function placeTower(world) {
   const targetTower = hitTower(world) || hitTower(buildTarget);
 
   if (startTower && targetTower) {
+    if (!isPlacementInsideBoundary("tower", startTower.x, startTower.y) || !isPlacementInsideBoundary("tower", targetTower.x, targetTower.y)) {
+      setActionState("Cannot build wall outside map boundary.", "warn", true);
+      return;
+    }
     if (targetTower.id === startTower.id) {
       setActionState("A tower cannot connect to itself.", "warn", true);
       return;
@@ -957,15 +1007,17 @@ function getBuildPlacementTarget(world, startTower = null) {
 }
 
 function getBuildPlacementPreview(world, startTower = null) {
-  if (!editorSettings.buildModeSnapEnabled || !interaction.snapEnabled) {
+  if (!editorSettings.buildModeSnapEnabled || !interaction.snapEnabled || interaction.snapTemporarilyDisabled) {
     return { x: world.x, y: world.y, guideX: null, guideY: null, xPoints: [], yPoints: [] };
   }
   const exclude = new Set();
-  if (startTower) exclude.add(makeKey("tower", startTower.uid));
   return getSnapResult(world.x, world.y, exclude);
 }
 
 function getBoundaryPlacementPreview(world) {
+  if (interaction.snapTemporarilyDisabled) {
+    return { x: world.x, y: world.y, guideX: null, guideY: null, xPoints: [], yPoints: [] };
+  }
   const candidates = state.map_boundaries.map((point) => ({ x: point.x, y: point.y }));
   const threshold = editorSettings.snapStrength / Math.max(view.scale, 0.0001);
   let bestX = null;
@@ -1433,6 +1485,7 @@ function onStateChanged() {
   sanitizeSelection();
   renderSelectionPanel();
   el.spawnProtectionInput.value = String(state.spawn_protection_size);
+  updateInvalidObjectWarning();
   requestRender();
 }
 
@@ -1450,11 +1503,48 @@ function onStateReplaced() {
   sanitizeSelection();
   renderSelectionPanel();
   el.spawnProtectionInput.value = String(state.spawn_protection_size);
+  updateInvalidObjectWarning();
   requestRender();
 }
 
 function sanitizeSelection() {
   Array.from(selection).forEach((key) => { if (!resolveKey(key)) selection.delete(key); });
+}
+
+function getInvalidObjects(mapState = state) {
+  const invalid = [];
+  mapState.towers.forEach((item) => {
+    if (isObjectInvalid("tower", item, mapState)) invalid.push({ type: "tower", item, key: makeKey("tower", item.uid) });
+  });
+  mapState.spawn_points.forEach((item) => {
+    if (isObjectInvalid("spawn", item, mapState)) invalid.push({ type: "spawn", item, key: makeKey("spawn", item.uid) });
+  });
+  mapState.bomb_sites.forEach((item) => {
+    if (isObjectInvalid("bomb", item, mapState)) invalid.push({ type: "bomb", item, key: makeKey("bomb", item.uid) });
+  });
+  mapState.structures.forEach((item) => {
+    if (isObjectInvalid("structure", item, mapState)) invalid.push({ type: "structure", item, key: makeKey("structure", item.uid) });
+  });
+  return invalid;
+}
+
+function isObjectInvalid(type, item, mapState = state) {
+  return !isPlacementInsideBoundary(type, item.x, item.y, item, mapState);
+}
+
+function updateInvalidObjectWarning() {
+  const count = getInvalidObjects().length;
+  const previousCount = invalidObjectWarningCount;
+  invalidObjectWarningCount = count;
+  if (count <= 0) {
+    if (previousCount > 0 && el.actionState.classList.contains("warn")) {
+      el.actionState.textContent = "Idle";
+      el.actionState.className = "action-state idle";
+    }
+    return false;
+  }
+  setActionState(`${count} object${count === 1 ? "" : "s"} invalid; export will remove invalid objects.`, "warn");
+  return true;
 }
 
 function draw() {
@@ -1537,11 +1627,14 @@ function drawStructures() {
     const size = Math.max(14, s.size * view.scale);
     const half = size / 2;
     const selected = selection.has(makeKey("structure", s.uid));
-    const fillColor = TEAM_COLORS[String(s.team_id)] || s.color || COLORS.red;
+    const invalid = isObjectInvalid("structure", s);
+    const fillColor = invalid ? COLORS.danger : (TEAM_COLORS[String(s.team_id)] || s.color || COLORS.red);
     ctx.fillStyle = fillColor;
+    ctx.globalAlpha = invalid ? 0.55 : 1.0;
     ctx.fillRect(p.x - half, p.y - half, size, size);
+    ctx.globalAlpha = 1.0;
     ctx.lineWidth = selected ? 3.3 : 2;
-    ctx.strokeStyle = selected ? "#FFD166" : "#5C1219";
+    ctx.strokeStyle = invalid ? COLORS.danger : (selected ? "#FFD166" : "#5C1219");
     ctx.strokeRect(p.x - half, p.y - half, size, size);
     ctx.fillStyle = "#FFE9EC";
     ctx.font = "700 10px 'Space Mono', monospace";
@@ -1558,10 +1651,11 @@ function drawWalls() {
     if (!aTower || !bTower) return;
     const a = worldToScreen(aTower.x, aTower.y);
     const b = worldToScreen(bTower.x, bTower.y);
-    const color = getTeamColor(wall.team_id);
+    const invalid = isObjectInvalid("tower", aTower) || isObjectInvalid("tower", bTower);
+    const color = invalid ? COLORS.danger : getTeamColor(wall.team_id);
     ctx.lineCap = "round";
     ctx.lineWidth = 32 * view.scale;
-    ctx.globalAlpha = 0.85;
+    ctx.globalAlpha = invalid ? 0.55 : 0.85;
     ctx.strokeStyle = color;
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
@@ -1589,11 +1683,12 @@ function drawSpawns() {
     const spawnSize = Math.max(1, Number(state.spawn_protection_size) || 500);
     const size = spawnSize * view.scale;
     const half = size / 2;
-    const color = getTeamColor(spawn.team_id);
+    const invalid = isObjectInvalid("spawn", spawn);
+    const color = invalid ? COLORS.danger : getTeamColor(spawn.team_id);
     ctx.lineWidth = 4 * view.scale;
     ctx.strokeStyle = color;
     ctx.fillStyle = color;
-    ctx.globalAlpha = 0.25;
+    ctx.globalAlpha = invalid ? 0.38 : 0.25;
     ctx.fillRect(p.x - half, p.y - half, size, size);
     ctx.globalAlpha = 1.0;
     ctx.strokeRect(p.x - half, p.y - half, size, size);
@@ -1616,11 +1711,12 @@ function drawBombSites() {
   state.bomb_sites.forEach((bomb) => {
     const p = worldToScreen(bomb.x, bomb.y);
     const radius = 250 * view.scale;
+    const invalid = isObjectInvalid("bomb", bomb);
     ctx.beginPath();
     ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
     ctx.lineWidth = 8 * view.scale;
-    ctx.strokeStyle = "rgba(51, 127, 229, 0.8)";
-    ctx.fillStyle = "rgba(51, 127, 229, 0.15)";
+    ctx.strokeStyle = invalid ? withAlpha(COLORS.danger, 0.85) : "rgba(51, 127, 229, 0.8)";
+    ctx.fillStyle = invalid ? withAlpha(COLORS.danger, 0.22) : "rgba(51, 127, 229, 0.15)";
     ctx.fill();
     ctx.stroke();
 
@@ -1643,21 +1739,35 @@ function drawBombSites() {
 function drawTowers() {
   state.towers.forEach((tower) => {
     const p = worldToScreen(tower.x, tower.y);
-    const color = tower.is_invincible ? COLORS.neutral : getTeamColor(tower.team_id);
+    const invalid = isObjectInvalid("tower", tower);
+    const color = getTeamColor(tower.team_id);
+    const borderColor = tower.is_invincible ? "#FFD166" : color;
 
     ctx.beginPath();
     ctx.arc(p.x, p.y, 44 * view.scale, 0, Math.PI * 2);
     ctx.lineWidth = 8 * view.scale;
-    ctx.strokeStyle = color;
+    ctx.strokeStyle = borderColor;
     ctx.fillStyle = color;
     ctx.fill();
     ctx.stroke();
 
-    ctx.fillStyle = "#FFFFFF";
-    ctx.font = `${16 * view.scale}px sans-serif`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(String(tower.health), p.x, p.y);
+    if (invalid) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 44 * view.scale, 0, Math.PI * 2);
+      ctx.fillStyle = withAlpha(COLORS.danger, 0.35);
+      ctx.fill();
+      ctx.lineWidth = 4 * view.scale;
+      ctx.strokeStyle = COLORS.danger;
+      ctx.stroke();
+    }
+
+    if (!tower.is_invincible) {
+      ctx.fillStyle = "#FFFFFF";
+      ctx.font = `${16 * view.scale}px sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(String(tower.health), p.x, p.y);
+    }
 
     if (selection.has(makeKey("tower", tower.uid))) {
       ctx.beginPath();
@@ -1712,22 +1822,25 @@ function drawBuildGhostTower() {
   const teamId = startTower ? startTower.team_id : defaults.defaultTeam;
   const invalid = Boolean(ghost.invalid) || !isPlacementInsideBoundary("tower", ghost.x, ghost.y);
   const color = invalid ? COLORS.danger : getTeamColor(teamId);
+  const borderColor = defaults.towerInvincible && !invalid ? "#FFD166" : color;
 
   ctx.globalAlpha = invalid ? 0.45 : 0.35;
   ctx.beginPath();
   ctx.arc(p.x, p.y, 44 * view.scale, 0, Math.PI * 2);
   ctx.lineWidth = 8 * view.scale;
-  ctx.strokeStyle = color;
+  ctx.strokeStyle = borderColor;
   ctx.fillStyle = color;
   ctx.fill();
   ctx.stroke();
 
-  ctx.globalAlpha = 0.9;
-  ctx.fillStyle = "#FFFFFF";
-  ctx.font = `${16 * view.scale}px sans-serif`;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(String(clamp(1, Math.round(defaults.towerHealth), 5)), p.x, p.y);
+  if (!defaults.towerInvincible) {
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = "#FFFFFF";
+    ctx.font = `${16 * view.scale}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(String(clamp(1, Math.round(defaults.towerHealth), 5)), p.x, p.y);
+  }
   ctx.globalAlpha = 1.0;
 }
 
@@ -1912,18 +2025,20 @@ function getTotalWallLength() {
 }
 
 function exportJSON() {
-  const validation = validateForExport();
+  const invalidRemoved = getInvalidObjects().length;
+  const exportState = getExportableState();
+  const validation = validateForExport(exportState);
   if (validation) {
     alert(validation);
     setActionState(validation, "error", true);
     return;
   }
   const payload = {
-    spawn_protection_size: Number(state.spawn_protection_size),
-    map_boundaries: state.map_boundaries.map((p) => ({ x: roundTo(p.x, 3), y: roundTo(p.y, 3) })),
-    spawn_points: state.spawn_points.map((s) => ({ team_id: s.team_id, x: roundTo(s.x, 3), y: roundTo(s.y, 3) })).sort((a, b) => a.team_id - b.team_id),
-    bomb_sites: state.bomb_sites.map((b) => ({ site_letter: String(b.site_letter || "A").toUpperCase(), x: roundTo(b.x, 3), y: roundTo(b.y, 3) })),
-    towers: [...state.towers].sort((a, b) => a.id - b.id).map((t) => ({
+    spawn_protection_size: Number(exportState.spawn_protection_size),
+    map_boundaries: exportState.map_boundaries.map((p) => ({ x: roundTo(p.x, 3), y: roundTo(p.y, 3) })),
+    spawn_points: exportState.spawn_points.map((s) => ({ team_id: s.team_id, x: roundTo(s.x, 3), y: roundTo(s.y, 3) })).sort((a, b) => a.team_id - b.team_id),
+    bomb_sites: exportState.bomb_sites.map((b) => ({ site_letter: String(b.site_letter || "A").toUpperCase(), x: roundTo(b.x, 3), y: roundTo(b.y, 3) })),
+    towers: [...exportState.towers].sort((a, b) => a.id - b.id).map((t) => ({
       id: t.id,
       team_id: t.team_id,
       x: roundTo(t.x, 3),
@@ -1931,10 +2046,10 @@ function exportJSON() {
       health: clamp(1, Math.round(t.health), 5),
       is_invincible: Boolean(t.is_invincible),
     })),
-    walls: state.walls.map((w) => ({ t1: w.t1, t2: w.t2, team_id: w.team_id })),
+    walls: exportState.walls.map((w) => ({ t1: w.t1, t2: w.t2, team_id: w.team_id })),
   };
-  if (state.structures.length) {
-    payload.structures = state.structures.map((s) => ({ id: s.id, x: roundTo(s.x, 3), y: roundTo(s.y, 3), size: s.size, label: s.label, color: s.color, team_id: s.team_id }));
+  if (exportState.structures.length) {
+    payload.structures = exportState.structures.map((s) => ({ id: s.id, x: roundTo(s.x, 3), y: roundTo(s.y, 3), size: s.size, label: s.label, color: s.color, team_id: s.team_id }));
   }
   const json = JSON.stringify(payload, null, 2);
   const blob = new Blob([json], { type: "application/json" });
@@ -1946,23 +2061,36 @@ function exportJSON() {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
-  setActionState("Export successful", "success", true);
+  setActionState(invalidRemoved ? `Export successful; removed ${invalidRemoved} invalid object${invalidRemoved === 1 ? "" : "s"}` : "Export successful", "success", true);
 }
 
-function validateForExport() {
-  if (state.map_boundaries.length < 3) return "Validation error: map_boundaries must contain at least 3 points.";
-  const team0 = state.spawn_points.filter((p) => p.team_id === 0).length;
-  const team1 = state.spawn_points.filter((p) => p.team_id === 1).length;
-  if (state.spawn_points.length !== 2 || team0 !== 1 || team1 !== 1) {
+function getExportableState() {
+  const towers = state.towers.filter((item) => !isObjectInvalid("tower", item));
+  const towerIds = new Set(towers.map((tower) => tower.id));
+  return {
+    ...state,
+    spawn_points: state.spawn_points.filter((item) => !isObjectInvalid("spawn", item)),
+    bomb_sites: state.bomb_sites.filter((item) => !isObjectInvalid("bomb", item)),
+    towers,
+    walls: state.walls.filter((wall) => towerIds.has(wall.t1) && towerIds.has(wall.t2)),
+    structures: state.structures.filter((item) => !isObjectInvalid("structure", item)),
+  };
+}
+
+function validateForExport(mapState = state) {
+  if (mapState.map_boundaries.length < 3) return "Validation error: map_boundaries must contain at least 3 points.";
+  const team0 = mapState.spawn_points.filter((p) => p.team_id === 0).length;
+  const team1 = mapState.spawn_points.filter((p) => p.team_id === 1).length;
+  if (mapState.spawn_points.length !== 2 || team0 !== 1 || team1 !== 1) {
     return "Validation error: spawn_points must include exactly one Team 0 and one Team 1 spawn.";
   }
-  const ids = new Set(state.towers.map((t) => t.id));
+  const ids = new Set(mapState.towers.map((t) => t.id));
   const seen = new Set();
-  for (const wall of state.walls) {
+  for (const wall of mapState.walls) {
     if (wall.t1 === wall.t2) return "Validation error: wall cannot connect a tower to itself.";
     if (!ids.has(wall.t1) || !ids.has(wall.t2)) return "Validation error: wall references a missing tower id.";
-    const a = getTowerById(wall.t1);
-    const b = getTowerById(wall.t2);
+    const a = getTowerByIdFrom(mapState, wall.t1);
+    const b = getTowerByIdFrom(mapState, wall.t2);
     if (!a || !b) return "Validation error: wall references a missing tower id.";
     if (a.team_id !== b.team_id || wall.team_id !== a.team_id) {
       return "Validation error: every wall and its connected towers must share the same team color.";
@@ -1971,8 +2099,8 @@ function validateForExport() {
     if (seen.has(key)) return "Validation error: duplicate wall between two towers.";
     seen.add(key);
   }
-  if (findWallOverlap()) return "Validation error: walls cannot overlap or intersect.";
-  if (hasTowerOnWallConflict()) return "Validation error: a tower overlaps an existing wall.";
+  if (findWallOverlap(null, mapState)) return "Validation error: walls cannot overlap or intersect.";
+  if (hasTowerOnWallConflict(null, mapState)) return "Validation error: a tower overlaps an existing wall.";
   return null;
 }
 
@@ -2266,8 +2394,10 @@ function setActionState(text, tone = "idle", autoReset = false) {
   el.actionState.className = `action-state ${tone}`;
   if (autoReset) {
     actionTimer = setTimeout(() => {
-      el.actionState.textContent = "Idle";
-      el.actionState.className = "action-state idle";
+      if (!updateInvalidObjectWarning()) {
+        el.actionState.textContent = "Idle";
+        el.actionState.className = "action-state idle";
+      }
       actionTimer = null;
     }, 2200);
   }
@@ -2326,25 +2456,29 @@ function expectString(value, path) {
   return value.trim();
 }
 
-function isInsideCurrentBoundary(x, y) {
-  if (state.map_boundaries.length < 3) return true;
-  return pointInPolygon(x, y, state.map_boundaries);
+function hasUsableBoundary(mapState = state) {
+  return mapState.map_boundaries.length >= 3;
 }
 
-function isPlacementInsideBoundary(type, x, y, item = null) {
-  if (state.map_boundaries.length < 3) return true;
-  if (type === "tower") return isCircleInsideBoundary(x, y, 44);
-  if (type === "bomb") return isCircleInsideBoundary(x, y, 250);
-  if (type === "spawn") return isSquareInsideBoundary(x, y, (Number(state.spawn_protection_size) || 500) / 2);
+function isInsideCurrentBoundary(x, y, mapState = state) {
+  if (!hasUsableBoundary(mapState)) return false;
+  return pointInPolygon(x, y, mapState.map_boundaries);
+}
+
+function isPlacementInsideBoundary(type, x, y, item = null, mapState = state) {
+  if (!hasUsableBoundary(mapState)) return false;
+  if (type === "tower") return isCircleInsideBoundary(x, y, 44, mapState);
+  if (type === "bomb") return isCircleInsideBoundary(x, y, 250, mapState);
+  if (type === "spawn") return isSquareInsideBoundary(x, y, (Number(mapState.spawn_protection_size) || 500) / 2, mapState);
   if (type === "structure") {
     const half = item && Number.isFinite(item.size) ? item.size / 2 : 70;
-    return isSquareInsideBoundary(x, y, half);
+    return isSquareInsideBoundary(x, y, half, mapState);
   }
-  return isInsideCurrentBoundary(x, y);
+  return isInsideCurrentBoundary(x, y, mapState);
 }
 
-function isCircleInsideBoundary(x, y, radius) {
-  if (!isInsideCurrentBoundary(x, y)) return false;
+function isCircleInsideBoundary(x, y, radius, mapState = state) {
+  if (!isInsideCurrentBoundary(x, y, mapState)) return false;
   const testPoints = [
     { x: x + radius, y },
     { x: x - radius, y },
@@ -2355,10 +2489,10 @@ function isCircleInsideBoundary(x, y, radius) {
     { x: x - radius * 0.707, y: y + radius * 0.707 },
     { x: x - radius * 0.707, y: y - radius * 0.707 },
   ];
-  return testPoints.every((p) => isInsideCurrentBoundary(p.x, p.y));
+  return testPoints.every((p) => isInsideCurrentBoundary(p.x, p.y, mapState));
 }
 
-function isSquareInsideBoundary(x, y, half) {
+function isSquareInsideBoundary(x, y, half, mapState = state) {
   const testPoints = [
     { x, y },
     { x: x - half, y: y - half },
@@ -2366,7 +2500,7 @@ function isSquareInsideBoundary(x, y, half) {
     { x: x - half, y: y + half },
     { x: x + half, y: y + half },
   ];
-  return testPoints.every((p) => isInsideCurrentBoundary(p.x, p.y));
+  return testPoints.every((p) => isInsideCurrentBoundary(p.x, p.y, mapState));
 }
 
 function pointInPolygon(x, y, points) {
