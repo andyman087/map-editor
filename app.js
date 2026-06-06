@@ -33,6 +33,7 @@ const COLORS = {
 const TEAM_COLORS = { "-1": COLORS.neutral, "0": COLORS.blue, "1": COLORS.red };
 const TEAM_LABELS = { "-1": "Neutral", "0": "Team Blue", "1": "Team Red" };
 const SESSION_STORAGE_KEY = "top_down_map_editor_session_v1";
+const PANEL_LAYOUT_STORAGE_KEY = "top_down_map_editor_panel_layout_v1";
 const MULTIPLAYER_USERNAME_KEY = "top_down_map_editor_username";
 const MULTIPLAYER_COLLECTIONS = [
   { key: "map_boundaries", type: "boundary", prefix: "boundary" },
@@ -44,6 +45,11 @@ const MULTIPLAYER_COLLECTIONS = [
 ];
 
 const el = {
+  appShell: document.querySelector(".app-shell"),
+  leftSidebar: document.querySelector(".left-sidebar"),
+  rightSidebar: document.querySelector(".right-sidebar"),
+  leftResizeHandle: document.getElementById("leftResizeHandle"),
+  rightResizeHandle: document.getElementById("rightResizeHandle"),
   toolButtons: Array.from(document.querySelectorAll(".tool-button")),
   teamSwatches: Array.from(document.querySelectorAll(".team-swatch")),
   selectionPanel: document.getElementById("selectionPanel"),
@@ -73,6 +79,7 @@ let actionTimer = null;
 let invalidObjectWarningCount = 0;
 let editorClipboard = null;
 let multiplayerManager = null;
+let panelResize = null;
 
 let state = createInitialState();
 const selection = new Set();
@@ -1060,6 +1067,7 @@ setup();
 function setup() {
   hydrateCountersFromState();
   bindUI();
+  setupPanelResizers();
   setupMultiplayer();
   updateTeamSwatches();
   el.snapStrengthInput.value = String(editorSettings.snapStrength);
@@ -1072,7 +1080,7 @@ function setup() {
   renderSelectionPanel();
   setActionState("Idle", "idle");
   requestRender();
-  window.addEventListener("resize", resizeCanvas);
+  window.addEventListener("resize", onWindowResize);
   requestAnimationFrame(frame);
 }
 
@@ -1095,6 +1103,94 @@ function queueRedraw() {
 function setupMultiplayer() {
   multiplayerManager = new MultiplayerManager();
   multiplayerManager.bindUI();
+}
+
+function setupPanelResizers() {
+  restorePanelLayout();
+  el.leftResizeHandle?.addEventListener("pointerdown", (event) => startPanelResize("left", event));
+  el.rightResizeHandle?.addEventListener("pointerdown", (event) => startPanelResize("right", event));
+}
+
+function startPanelResize(side, event) {
+  if (window.matchMedia("(max-width: 980px)").matches) return;
+  event.preventDefault();
+  const handle = side === "left" ? el.leftResizeHandle : el.rightResizeHandle;
+  panelResize = {
+    side,
+    handle,
+    startX: event.clientX,
+    startWidth: getPanelWidth(side),
+  };
+  handle?.classList.add("active");
+  document.body.classList.add("resizing-panels");
+  window.addEventListener("pointermove", onPanelResizeMove);
+  window.addEventListener("pointerup", finishPanelResize, { once: true });
+}
+
+function onPanelResizeMove(event) {
+  if (!panelResize) return;
+  const dx = event.clientX - panelResize.startX;
+  const nextWidth = panelResize.side === "left"
+    ? panelResize.startWidth + dx
+    : panelResize.startWidth - dx;
+  setPanelWidth(panelResize.side, nextWidth);
+  resizeCanvas();
+}
+
+function finishPanelResize() {
+  if (!panelResize) return;
+  panelResize.handle?.classList.remove("active");
+  panelResize = null;
+  document.body.classList.remove("resizing-panels");
+  window.removeEventListener("pointermove", onPanelResizeMove);
+  savePanelLayout();
+  resizeCanvas();
+}
+
+function onWindowResize() {
+  if (!window.matchMedia("(max-width: 980px)").matches) {
+    setPanelWidth("left", getPanelWidth("left"));
+    setPanelWidth("right", getPanelWidth("right"));
+  }
+  resizeCanvas();
+}
+
+function restorePanelLayout() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PANEL_LAYOUT_STORAGE_KEY) || "{}");
+    if (Number.isFinite(saved.left)) setPanelWidth("left", saved.left);
+    if (Number.isFinite(saved.right)) setPanelWidth("right", saved.right);
+  } catch (error) {
+    console.warn("Could not restore panel layout.", error);
+  }
+}
+
+function savePanelLayout() {
+  try {
+    localStorage.setItem(PANEL_LAYOUT_STORAGE_KEY, JSON.stringify({
+      left: Math.round(getPanelWidth("left")),
+      right: Math.round(getPanelWidth("right")),
+    }));
+  } catch (error) {
+    console.warn("Could not save panel layout.", error);
+  }
+}
+
+function setPanelWidth(side, width) {
+  if (!el.appShell) return width;
+  const otherWidth = getPanelWidth(side === "left" ? "right" : "left");
+  const shellWidth = el.appShell.getBoundingClientRect().width || window.innerWidth;
+  const minWidth = 210;
+  const maxWidth = Math.min(620, Math.max(minWidth, shellWidth - otherWidth - 430));
+  const nextWidth = clamp(minWidth, Math.round(width), maxWidth);
+  el.appShell.style.setProperty(`--${side}-sidebar-width`, `${nextWidth}px`);
+  return nextWidth;
+}
+
+function getPanelWidth(side) {
+  const node = side === "left" ? el.leftSidebar : el.rightSidebar;
+  const fallback = side === "left" ? 280 : 330;
+  return node?.getBoundingClientRect().width || fallback;
 }
 
 function bindUI() {

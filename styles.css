@@ -40,7 +40,7 @@ body {
 .app-shell {
   height: 100vh;
   display: grid;
-  grid-template-columns: 280px minmax(340px, 1fr) 330px;
+  grid-template-columns: var(--left-sidebar-width, 280px) 4px minmax(340px, 1fr) 4px var(--right-sidebar-width, 330px);
   gap: 10px;
   padding: 10px;
 }
@@ -63,6 +63,32 @@ body {
 .right-sidebar {
   display: flex;
   flex-direction: column;
+}
+
+.panel-resize-handle {
+  align-self: stretch;
+  border-radius: 999px;
+  cursor: col-resize;
+  touch-action: none;
+  background:
+    linear-gradient(180deg, transparent, rgba(111, 207, 151, 0.38), transparent),
+    rgba(61, 90, 133, 0.18);
+  border: 1px solid rgba(90, 128, 173, 0.22);
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.panel-resize-handle:hover,
+.panel-resize-handle.active {
+  background:
+    linear-gradient(180deg, transparent, rgba(111, 207, 151, 0.78), transparent),
+    rgba(61, 90, 133, 0.36);
+  border-color: rgba(111, 207, 151, 0.58);
+  box-shadow: 0 0 0 1px rgba(111, 207, 151, 0.18);
+}
+
+body.resizing-panels {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .sidebar-header {
@@ -423,7 +449,7 @@ select:focus {
 
 @media (max-width: 1200px) {
   .app-shell {
-    grid-template-columns: 245px minmax(300px, 1fr) 285px;
+    grid-template-columns: var(--left-sidebar-width, 245px) 4px minmax(300px, 1fr) 4px var(--right-sidebar-width, 285px);
   }
 }
 
@@ -433,6 +459,10 @@ select:focus {
     min-height: 100vh;
     grid-template-columns: 1fr;
     grid-template-rows: auto minmax(420px, 55vh) auto;
+  }
+
+  .panel-resize-handle {
+    display: none;
   }
 
   .left-sidebar,
