@@ -62,7 +62,6 @@ const el = {
   buildSnapEnabledInput: document.getElementById("buildSnapEnabledInput"),
   usernameInput: document.getElementById("usernameInput"),
   hostSessionBtn: document.getElementById("hostSessionBtn"),
-  multiplayerStatus: document.getElementById("multiplayerStatus"),
   multiplayerToastStack: document.getElementById("multiplayerToastStack"),
   towerHealthInput: document.getElementById("towerHealthInput"),
   towerInvincibleInput: document.getElementById("towerInvincibleInput"),
@@ -845,10 +844,6 @@ class MultiplayerManager {
   }
 
   setStatus(text, tone = "idle", options = {}) {
-    if (el.multiplayerStatus) {
-      el.multiplayerStatus.textContent = text;
-      el.multiplayerStatus.dataset.tone = tone;
-    }
     const shouldToast = options.toast ?? true;
     if (shouldToast) this.showStatusToast(text, tone === "idle" ? "info" : tone);
   }
@@ -1537,6 +1532,11 @@ function updateCursor() {
 function onMouseDown(event) {
   updateMousePosition(event);
 
+  if (event.button === 2 && unlinkBuildTower()) {
+    event.preventDefault();
+    return;
+  }
+
   if (isPanTrigger(event)) {
     interaction.isPanning = true;
     interaction.panStartMouse = { ...interaction.mouseScreen };
@@ -1803,6 +1803,8 @@ function onKeyDown(event) {
     return;
   }
   if (key === "escape") {
+    event.preventDefault();
+    if (unlinkBuildTower()) return;
     interaction.wallDraft = null;
     interaction.hoverTowerId = null;
     interaction.towerDraftWarnActive = false;
@@ -2469,6 +2471,20 @@ function getAutoWallStartTower() {
   const entry = resolveKey(key);
   if (!entry || entry.type !== "tower") return null;
   return entry.item;
+}
+
+function unlinkBuildTower() {
+  const startTower = getAutoWallStartTower();
+  if (!startTower) return false;
+  selection.clear();
+  interaction.hoverTowerId = null;
+  interaction.towerDraftWarnActive = false;
+  interaction.wallDraftWarnActive = false;
+  renderSelectionPanel();
+  refreshPlacementPreviewFromMouse();
+  setActionState("Build link cleared", "idle", true);
+  requestRender();
+  return true;
 }
 
 function getBuildPlacementTarget(world, startTower = null) {
