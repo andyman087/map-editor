@@ -810,6 +810,7 @@ function startRotate(keysToRotate, world) {
     moved: false,
     invalid: false,
     invalidReason: "",
+    wallSnapGuide: null,
   };
   setActionState("Rotating selection", "idle");
 }
@@ -818,11 +819,10 @@ function applyRotate(world) {
   const rotate = interaction.rotate;
   if (!rotate) return;
   const rawAngle = Math.atan2(world.y - rotate.center.y, world.x - rotate.center.x) - rotate.startAngle;
-  const angle = interaction.snapTemporarilyDisabled ? rawAngle : snapAngleNear(
-    rawAngle,
-    degreesToRadians(GAME.ROTATION_SNAP_DEGREES),
-    degreesToRadians(GAME.ROTATION_SNAP_THRESHOLD_DEGREES),
-  );
+  const snap = interaction.snapTemporarilyDisabled
+    ? { angle: rawAngle, guide: null }
+    : getRotationSnap(rawAngle, rotate);
+  const angle = snap.angle;
   const nextPositions = new Map();
 
   rotate.startPositions.forEach((pos, key) => {
@@ -850,6 +850,7 @@ function applyRotate(world) {
 
   rotate.invalid = Boolean(invalidReason);
   rotate.invalidReason = invalidReason;
+  rotate.wallSnapGuide = snap.guide;
   nextPositions.forEach((pos, key) => setKeyPosition(key, pos.x, pos.y));
   rotate.moved = Math.abs(angle) > 0.001;
   updateLiveSelectionCoordinates();
@@ -879,6 +880,88 @@ function getTowerTargetsFromPositionMap(positionMap) {
     if (entry && entry.type === "tower") overrides.set(entry.item.id, { x: pos.x, y: pos.y });
   });
   return overrides;
+}
+
+function getRotationSnap(rawAngle, rotate) {
+  const threshold = degreesToRadians(GAME.ROTATION_SNAP_THRESHOLD_DEGREES);
+  const step = degreesToRadians(GAME.ROTATION_SNAP_DEGREES);
+  const baseAngle = Math.round(rawAngle / step) * step;
+  const candidates = [];
+  const baseDelta = angleDistance(rawAngle, baseAngle);
+  if (baseDelta <= threshold) candidates.push({ angle: baseAngle, delta: baseDelta, guide: null });
+  candidates.push(...getWallRotationSnapCandidates(rawAngle, rotate, threshold));
+  if (!candidates.length) return { angle: rawAngle, guide: null };
+  candidates.sort((a, b) => a.delta - b.delta || (a.guide ? -1 : 1));
+  return { angle: candidates[0].angle, guide: candidates[0].guide || null };
+}
+
+function getWallRotationSnapCandidates(rawAngle, rotate, angleThreshold) {
+  const selectedWalls = getRotatingWallSources(rotate);
+  if (!selectedWalls.length) return [];
+  const targets = getExternalWallTargets(rotate);
+  if (!targets.length) return [];
+  const lineThreshold = editorSettings.snapStrength / Math.max(view.scale, 0.0001);
+  const candidates = [];
+
+  selectedWalls.forEach((source) => {
+    targets.forEach((target) => {
+      const candidateAngle = nearestEquivalentAngle(target.angle - source.startAngle, rawAngle, Math.PI);
+      const delta = angleDistance(rawAngle, candidateAngle);
+      if (delta > angleThreshold) return;
+      const a = rotatePoint(source.startA.x, source.startA.y, rotate.center.x, rotate.center.y, candidateAngle);
+      const b = rotatePoint(source.startB.x, source.startB.y, rotate.center.x, rotate.center.y, candidateAngle);
+      const lineDistance = Math.max(
+        pointToInfiniteLineDistance(a, target.a, target.b),
+        pointToInfiniteLineDistance(b, target.a, target.b),
+      );
+      if (lineDistance > lineThreshold) return;
+      candidates.push({
+        angle: candidateAngle,
+        delta,
+        guide: {
+          source: { a, b },
+          target: { a: target.a, b: target.b },
+        },
+      });
+    });
+  });
+  return candidates;
+}
+
+function getRotatingWallSources(rotate) {
+  const sources = [];
+  state.walls.forEach((wall) => {
+    const aTower = getTowerById(wall.t1);
+    const bTower = getTowerById(wall.t2);
+    if (!aTower || !bTower) return;
+    const aKey = makeKey("tower", aTower.uid);
+    const bKey = makeKey("tower", bTower.uid);
+    if (!rotate.keySet.has(aKey) || !rotate.keySet.has(bKey)) return;
+    const startA = rotate.startPositions.get(aKey);
+    const startB = rotate.startPositions.get(bKey);
+    if (!startA || !startB) return;
+    sources.push({
+      wall,
+      startA,
+      startB,
+      startAngle: lineAngle(startA, startB),
+    });
+  });
+  return sources;
+}
+
+function getExternalWallTargets(rotate) {
+  const targets = [];
+  state.walls.forEach((wall) => {
+    const aTower = getTowerById(wall.t1);
+    const bTower = getTowerById(wall.t2);
+    if (!aTower || !bTower) return;
+    if (rotate.keySet.has(makeKey("tower", aTower.uid)) || rotate.keySet.has(makeKey("tower", bTower.uid))) return;
+    const a = { x: aTower.x, y: aTower.y };
+    const b = { x: bTower.x, y: bTower.y };
+    targets.push({ wall, a, b, angle: lineAngle(a, b) });
+  });
+  return targets;
 }
 
 function finishBoxSelection() {
@@ -2502,6 +2585,33 @@ function drawGuides() {
       ctx.fill();
     });
   }
+  drawRotationWallSnapGuide();
+}
+
+function drawRotationWallSnapGuide() {
+  const guide = interaction.rotate?.wallSnapGuide;
+  if (!guide) return;
+  drawGuideSegment(guide.target.a, guide.target.b, 5, 0.88);
+  drawGuideSegment(guide.source.a, guide.source.b, 3, 0.72);
+  [guide.target.a, guide.target.b, guide.source.a, guide.source.b].forEach((point) => {
+    const p = worldToScreen(point.x, point.y);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 4.2, 0, Math.PI * 2);
+    ctx.fillStyle = withAlpha(COLORS.guide, 0.95);
+    ctx.fill();
+  });
+}
+
+function drawGuideSegment(a, b, width, alpha) {
+  const start = worldToScreen(a.x, a.y);
+  const end = worldToScreen(b.x, b.y);
+  ctx.lineCap = "round";
+  ctx.lineWidth = width;
+  ctx.strokeStyle = withAlpha(COLORS.guide, alpha);
+  ctx.beginPath();
+  ctx.moveTo(start.x, start.y);
+  ctx.lineTo(end.x, end.y);
+  ctx.stroke();
 }
 
 function drawWallDraft() {
@@ -3062,6 +3172,28 @@ function rotateVector(x, y, angle) {
 function snapAngleNear(angle, step, threshold) {
   const snapped = Math.round(angle / step) * step;
   return Math.abs(angle - snapped) <= threshold ? snapped : angle;
+}
+function angleDistance(a, b) {
+  return Math.abs(normalizeAngle(a - b));
+}
+function normalizeAngle(angle) {
+  let out = angle;
+  while (out <= -Math.PI) out += Math.PI * 2;
+  while (out > Math.PI) out -= Math.PI * 2;
+  return out;
+}
+function nearestEquivalentAngle(angle, reference, period = Math.PI * 2) {
+  return angle + Math.round((reference - angle) / period) * period;
+}
+function lineAngle(a, b) {
+  return Math.atan2(b.y - a.y, b.x - a.x);
+}
+function pointToInfiniteLineDistance(point, a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const length = Math.hypot(dx, dy);
+  if (length <= 0.0001) return Infinity;
+  return Math.abs(dx * (a.y - point.y) - (a.x - point.x) * dy) / length;
 }
 function degreesToRadians(degrees) {
   return degrees * (Math.PI / 180);
