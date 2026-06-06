@@ -379,6 +379,40 @@ select:focus {
   background: linear-gradient(175deg, #23435b, #1a3349);
 }
 
+.multiplayer-settings {
+  margin: 10px 0 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(90, 128, 173, 0.35);
+}
+
+.multiplayer-settings h3 {
+  margin: 0 0 8px;
+  color: #dbe8f7;
+  font-size: 0.95rem;
+  letter-spacing: 0.03em;
+}
+
+.multiplayer-status {
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 1px solid rgba(90, 128, 173, 0.45);
+  border-radius: 7px;
+  background: rgba(12, 26, 45, 0.8);
+  color: var(--text-dim);
+  font-family: "Space Mono", monospace;
+  font-size: 0.76rem;
+}
+
+.multiplayer-status[data-tone="success"] {
+  border-color: rgba(111, 207, 151, 0.65);
+  color: #d7f7e3;
+}
+
+.multiplayer-status[data-tone="warn"] {
+  border-color: rgba(255, 201, 112, 0.65);
+  color: #ffe7b7;
+}
+
 .data-panel {
   margin-bottom: 8px;
 }

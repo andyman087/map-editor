@@ -33,6 +33,15 @@ const COLORS = {
 const TEAM_COLORS = { "-1": COLORS.neutral, "0": COLORS.blue, "1": COLORS.red };
 const TEAM_LABELS = { "-1": "Neutral", "0": "Team Blue", "1": "Team Red" };
 const SESSION_STORAGE_KEY = "top_down_map_editor_session_v1";
+const MULTIPLAYER_USERNAME_KEY = "top_down_map_editor_username";
+const MULTIPLAYER_COLLECTIONS = [
+  { key: "map_boundaries", type: "boundary", prefix: "boundary" },
+  { key: "spawn_points", type: "spawn", prefix: "spawn" },
+  { key: "bomb_sites", type: "bomb", prefix: "bomb" },
+  { key: "towers", type: "tower", prefix: "tower" },
+  { key: "structures", type: "structure", prefix: "structure" },
+  { key: "walls", type: "wall", prefix: "wall" },
+];
 
 const el = {
   toolButtons: Array.from(document.querySelectorAll(".tool-button")),
@@ -44,6 +53,9 @@ const el = {
   spawnProtectionInput: document.getElementById("spawnProtectionInput"),
   snapStrengthInput: document.getElementById("snapStrengthInput"),
   buildSnapEnabledInput: document.getElementById("buildSnapEnabledInput"),
+  usernameInput: document.getElementById("usernameInput"),
+  hostSessionBtn: document.getElementById("hostSessionBtn"),
+  multiplayerStatus: document.getElementById("multiplayerStatus"),
   towerHealthInput: document.getElementById("towerHealthInput"),
   towerInvincibleInput: document.getElementById("towerInvincibleInput"),
   actionState: document.getElementById("actionState"),
@@ -60,6 +72,7 @@ let needsRender = true;
 let actionTimer = null;
 let invalidObjectWarningCount = 0;
 let editorClipboard = null;
+let multiplayerManager = null;
 
 let state = createInitialState();
 const selection = new Set();
@@ -101,12 +114,953 @@ const interaction = {
   guides: { x: null, y: null, xPoints: [], yPoints: [] },
 };
 
+class MultiplayerManager {
+  constructor() {
+    this.role = "offline";
+    this.peer = null;
+    this.localPeerId = "";
+    this.hostPeerId = "";
+    this.hostConn = null;
+    this.connections = new Map();
+    this.connectedPeers = {};
+    this.actionSequence = 0;
+    this.actionQueue = [];
+    this.processingQueue = false;
+    this.isApplyingRemote = false;
+    this.lastCursorSentAt = 0;
+    this.retryTimer = null;
+    this.succession = new SuccessionLogic(this);
+    this.validator = new ActionValidator(this);
+    this.rollback = new RollbackHandler(this);
+  }
+
+  bindUI() {
+    if (!el.usernameInput) return;
+    el.usernameInput.value = this.getUsername();
+    el.usernameInput.addEventListener("change", () => {
+      const username = this.getUsername();
+      localStorage.setItem(MULTIPLAYER_USERNAME_KEY, username);
+      this.updateLocalPeerMeta();
+      this.broadcastPeerList();
+      this.setStatus(`Username set to ${username}`);
+    });
+    el.hostSessionBtn?.addEventListener("click", () => this.copyOrCreateHostLink());
+    this.autofillAndAutoJoinFromUrl();
+    this.updateUi();
+  }
+
+  getUsername() {
+    const raw = el.usernameInput?.value || localStorage.getItem(MULTIPLAYER_USERNAME_KEY) || "Player";
+    return String(raw).trim().slice(0, 32) || "Player";
+  }
+
+  shouldUseTemporaryIds() {
+    return this.role === "client" && !this.isApplyingRemote;
+  }
+
+  copyOrCreateHostLink() {
+    if ((this.role === "host" && this.localPeerId) || (this.role === "client" && this.hostPeerId)) {
+      this.copyHostLink();
+      return;
+    }
+    this.hostSession({ copyOnOpen: true });
+  }
+
+  hostSession(options = {}) {
+    if (!this.ensurePeerJs()) return;
+    this.closeExistingConnections();
+    this.role = "hosting";
+    this.setStatus("Starting host session...");
+    this.peer = new Peer();
+    this.attachPeerEvents();
+    this.peer.on("open", (id) => {
+      this.role = "host";
+      this.localPeerId = id;
+      this.hostPeerId = id;
+      this.succession.set([id]);
+      this.updateLocalPeerMeta();
+      this.updateInviteLink();
+      this.updateUi();
+      if (options.copyOnOpen) this.copyHostLink();
+      else this.setStatus("Hosting. Use Copy host link to invite others.", "success");
+    });
+  }
+
+  joinSession(hostId, options = {}) {
+    const cleanHostId = String(hostId || "").trim();
+    if (!cleanHostId) {
+      this.setStatus("No host id found in the invite link.", "warn");
+      return;
+    }
+    if (!this.ensurePeerJs()) return;
+    if (!options.reconnect) this.closeExistingConnections();
+    this.role = "client";
+    this.hostPeerId = cleanHostId;
+    this.setStatus(options.reconnect ? `Reconnecting to new host ${cleanHostId}...` : `Joining ${cleanHostId}...`);
+    if (!this.peer || this.peer.destroyed) {
+      this.peer = new Peer();
+      this.attachPeerEvents();
+      this.peer.on("open", (id) => {
+        this.localPeerId = id;
+        this.connectToHost(cleanHostId, options);
+      });
+    } else if (this.peer.open) {
+      this.connectToHost(cleanHostId, options);
+    } else {
+      this.peer.once("open", (id) => {
+        this.localPeerId = id;
+        this.connectToHost(cleanHostId, options);
+      });
+    }
+    this.updateUi();
+  }
+
+  connectToHost(hostId, options = {}) {
+    if (!this.peer || !this.peer.open) return;
+    if (this.hostConn) {
+      this.hostConn._manualClose = true;
+      this.hostConn.close();
+    }
+    this.hostPeerId = hostId;
+    const conn = this.peer.connect(hostId, {
+      reliable: true,
+      metadata: { username: this.getUsername() },
+    });
+    this.hostConn = conn;
+    let handledClose = false;
+    conn.on("open", () => {
+      if (this.retryTimer) {
+        clearTimeout(this.retryTimer);
+        this.retryTimer = null;
+      }
+      this.setStatus(`Connected to host ${hostId}. Waiting for map state...`);
+      this.updateUi();
+    });
+    conn.on("data", (payload) => this.handleHostData(payload));
+    conn.on("close", () => {
+      if (conn._manualClose) return;
+      if (handledClose) return;
+      handledClose = true;
+      this.handleHostConnectionLost();
+    });
+    conn.on("error", () => {
+      if (conn._manualClose) return;
+      if (handledClose) return;
+      handledClose = true;
+      this.handleHostConnectionLost();
+    });
+    if (options.reconnect) {
+      this.retryTimer = setTimeout(() => {
+        if (this.role === "client" && (!this.hostConn || !this.hostConn.open)) {
+          this.connectToHost(hostId, options);
+        }
+      }, 1200);
+    }
+  }
+
+  promoteToHost(previousList) {
+    this.role = "host";
+    this.hostPeerId = this.localPeerId;
+    this.hostConn = null;
+    this.connections.clear();
+    this.connectedPeers = {};
+    const nextList = [this.localPeerId, ...previousList.slice(2).filter((id) => id !== this.localPeerId)];
+    this.succession.set(nextList);
+    this.updateLocalPeerMeta();
+    this.updateInviteLink();
+    this.updateUi();
+    this.setStatus("Host disconnected. You are now the host.", "success");
+  }
+
+  attachPeerEvents() {
+    if (!this.peer) return;
+    this.peer.on("connection", (conn) => this.acceptIncomingConnection(conn));
+    this.peer.on("error", (error) => this.setStatus(`Peer error: ${error.type || error.message}`, "warn"));
+    this.peer.on("disconnected", () => this.setStatus("Peer server disconnected; existing P2P links may remain open.", "warn"));
+  }
+
+  acceptIncomingConnection(conn) {
+    if (this.role !== "host") {
+      conn.on("open", () => this.safeSend(conn, { type: "join_reject", reason: "This peer is not the active host." }));
+      return;
+    }
+    const peerId = conn.peer;
+    this.connections.set(peerId, conn);
+    this.connectedPeers[peerId] = {
+      peerId,
+      username: conn.metadata?.username || `Peer ${peerId.slice(0, 5)}`,
+      color: this.colorForPeer(peerId),
+      role: "client",
+    };
+    conn.on("open", () => {
+      this.succession.add(peerId);
+      this.sendFullState(conn);
+      this.broadcastSuccession();
+      this.broadcastPeerList();
+      this.setStatus(`Peer joined: ${this.connectedPeers[peerId].username}`);
+    });
+    conn.on("data", (payload) => this.handleClientData(conn, payload));
+    conn.on("close", () => this.removeClient(peerId));
+    conn.on("error", () => this.removeClient(peerId));
+  }
+
+  removeClient(peerId) {
+    if (!this.connections.has(peerId) && !this.connectedPeers[peerId]) return;
+    this.connections.delete(peerId);
+    delete this.connectedPeers[peerId];
+    this.succession.remove(peerId);
+    this.broadcastSuccession();
+    this.broadcastPeerList();
+    this.setStatus(`Peer left: ${peerId}`);
+  }
+
+  handleHostConnectionLost() {
+    if (this.role !== "client") return;
+    const list = this.succession.list.slice();
+    this.setStatus("Host connection lost. Checking succession list...", "warn");
+    this.succession.handleHostLost(list);
+  }
+
+  handleClientData(conn, payload) {
+    if (!payload || typeof payload !== "object") return;
+    if (payload.type === "action_request") this.enqueueActionRequest(conn, payload);
+    else if (payload.type === "cursor_move") this.receiveClientCursor(conn.peer, payload);
+    else if (payload.type === "peer_meta") {
+      this.connectedPeers[conn.peer] = {
+        ...(this.connectedPeers[conn.peer] || {}),
+        peerId: conn.peer,
+        username: payload.username || conn.peer,
+        color: this.colorForPeer(conn.peer),
+        role: "client",
+      };
+      this.broadcastPeerList();
+    }
+  }
+
+  handleHostData(payload) {
+    if (!payload || typeof payload !== "object") return;
+    if (payload.type === "full_state") this.applyFullState(payload);
+    else if (payload.type === "succession_update") this.succession.set(payload.successionList || []);
+    else if (payload.type === "peer_list") this.applyPeerList(payload.peers || {});
+    else if (payload.type === "action_commit") this.applyActionCommit(payload);
+    else if (payload.type === "action_reject") this.rollback.reject(payload);
+    else if (payload.type === "cursor_move") this.receiveRemoteCursor(payload);
+    else if (payload.type === "join_reject") this.setStatus(payload.reason || "Join rejected.", "warn");
+  }
+
+  enqueueActionRequest(conn, payload) {
+    this.actionQueue.push({ conn, payload });
+    this.processActionQueue();
+  }
+
+  processActionQueue() {
+    if (this.processingQueue) return;
+    this.processingQueue = true;
+    while (this.actionQueue.length) {
+      const { conn, payload } = this.actionQueue.shift();
+      this.processActionRequest(conn, payload);
+    }
+    this.processingQueue = false;
+  }
+
+  processActionRequest(conn, payload) {
+    const result = this.validator.applyActionRequest(state, payload);
+    if (!result.valid) {
+      this.safeSend(conn, {
+        type: "action_reject",
+        actionId: payload.actionId,
+        temporaryIds: payload.temporaryIds || {},
+        reason: result.reason,
+        state: cloneState(state),
+      });
+      return;
+    }
+    this.runWithoutNetwork(() => {
+      state = result.state;
+      onStateReplaced();
+    });
+    this.broadcast({
+      type: "action_commit",
+      actionId: payload.actionId,
+      actionType: payload.actionType,
+      temporaryIds: payload.temporaryIds || {},
+      permanentIds: result.permanentIds,
+      state: cloneState(state),
+    });
+    this.setStatus(`Committed ${payload.actionType || "remote action"}`, "success");
+  }
+
+  handleLocalAction(type, before, after, historyEntry = null) {
+    if (this.isApplyingRemote || this.role === "offline") return;
+    const actionId = `${this.localPeerId || "local"}_${Date.now()}_${++this.actionSequence}`;
+    if (historyEntry) historyEntry.actionId = actionId;
+    const payload = {
+      type: "action_request",
+      actionId,
+      actionType: type,
+      peerId: this.localPeerId,
+      username: this.getUsername(),
+      before,
+      after,
+      temporaryIds: this.validator.getTemporaryIds(before, after),
+      timestamp: Date.now(),
+    };
+    if (this.role === "host") {
+      this.broadcast({
+        type: "action_commit",
+        actionId,
+        actionType: type,
+        temporaryIds: payload.temporaryIds,
+        permanentIds: { uids: {}, towerIds: {}, wallIds: {}, structureIds: {} },
+        state: cloneState(state),
+      });
+      return;
+    }
+    if (this.role === "client" && this.hostConn?.open) {
+      this.rollback.track(payload);
+      this.safeSend(this.hostConn, payload);
+    }
+  }
+
+  applyFullState(payload) {
+    if (payload.successionList) this.succession.set(payload.successionList);
+    if (payload.peers) this.applyPeerList(payload.peers);
+    this.applyAuthoritativeState(payload.state);
+    this.setStatus(`Synced full state from host ${this.hostPeerId}`, "success");
+  }
+
+  applyActionCommit(payload) {
+    this.rewriteHistoryIds(payload);
+    this.rollback.resolve(payload.actionId);
+    this.applyAuthoritativeState(payload.state);
+    this.setStatus(`Synced ${payload.actionType || "remote action"}`, "success");
+  }
+
+  removeHistoryAction(actionId) {
+    if (!actionId) return;
+    history.undo = history.undo.filter((action) => action.actionId !== actionId);
+    history.redo = history.redo.filter((action) => action.actionId !== actionId);
+  }
+
+  rewriteHistoryIds(payload) {
+    const permanentIds = payload?.permanentIds;
+    if (!permanentIds) return;
+    [...history.undo, ...history.redo].forEach((action) => {
+      if (action.actionId !== payload.actionId) return;
+      rewriteStateIds(action.before, permanentIds);
+      rewriteStateIds(action.after, permanentIds);
+    });
+  }
+
+  applyAuthoritativeState(nextState) {
+    if (!nextState) return;
+    this.runWithoutNetwork(() => {
+      state = cloneState(nextState);
+      onStateReplaced();
+    });
+    queueRedraw();
+  }
+
+  runWithoutNetwork(fn) {
+    const previous = this.isApplyingRemote;
+    this.isApplyingRemote = true;
+    try {
+      fn();
+    } finally {
+      this.isApplyingRemote = previous;
+    }
+  }
+
+  sendFullState(conn) {
+    this.safeSend(conn, {
+      type: "full_state",
+      state: cloneState(state),
+      successionList: this.succession.list.slice(),
+      peers: this.getPeerSnapshot(),
+    });
+  }
+
+  broadcastSuccession() {
+    if (this.role !== "host") return;
+    this.broadcast({ type: "succession_update", successionList: this.succession.list.slice() });
+  }
+
+  broadcastPeerList() {
+    if (this.role !== "host") return;
+    this.broadcast({ type: "peer_list", peers: this.getPeerSnapshot() });
+  }
+
+  getPeerSnapshot() {
+    const peers = {
+      [this.localPeerId]: {
+        peerId: this.localPeerId,
+        username: this.getUsername(),
+        color: this.colorForPeer(this.localPeerId || "host"),
+        role: this.role,
+      },
+    };
+    Object.entries(this.connectedPeers).forEach(([peerId, info]) => {
+      peers[peerId] = {
+        peerId,
+        username: info.username || peerId,
+        color: info.color || this.colorForPeer(peerId),
+        role: info.role || "client",
+        x: info.x,
+        y: info.y,
+      };
+    });
+    return peers;
+  }
+
+  applyPeerList(peers) {
+    this.connectedPeers = {};
+    Object.entries(peers).forEach(([peerId, info]) => {
+      if (peerId === this.localPeerId) return;
+      this.connectedPeers[peerId] = {
+        peerId,
+        username: info.username || peerId,
+        color: info.color || this.colorForPeer(peerId),
+        role: info.role || "peer",
+        x: info.x,
+        y: info.y,
+      };
+    });
+    queueRedraw();
+  }
+
+  receiveClientCursor(peerId, payload) {
+    const info = this.connectedPeers[peerId] || {};
+    this.connectedPeers[peerId] = {
+      ...info,
+      peerId,
+      username: payload.username || info.username || peerId,
+      color: info.color || this.colorForPeer(peerId),
+      x: payload.x,
+      y: payload.y,
+      role: "client",
+    };
+    this.broadcast({ ...payload, type: "cursor_move", peerId }, peerId);
+    queueRedraw();
+  }
+
+  receiveRemoteCursor(payload) {
+    if (!payload.peerId || payload.peerId === this.localPeerId) return;
+    const info = this.connectedPeers[payload.peerId] || {};
+    this.connectedPeers[payload.peerId] = {
+      ...info,
+      peerId: payload.peerId,
+      username: payload.username || info.username || payload.peerId,
+      color: info.color || payload.color || this.colorForPeer(payload.peerId),
+      x: payload.x,
+      y: payload.y,
+      role: payload.role || info.role || "peer",
+    };
+    queueRedraw();
+  }
+
+  sendCursorMove(world) {
+    if (this.role === "offline" || !this.localPeerId) return;
+    const now = performance.now();
+    if (now - this.lastCursorSentAt < 33) return;
+    this.lastCursorSentAt = now;
+    const payload = {
+      type: "cursor_move",
+      peerId: this.localPeerId,
+      username: this.getUsername(),
+      color: this.colorForPeer(this.localPeerId),
+      x: roundTo(world.x, 2),
+      y: roundTo(world.y, 2),
+    };
+    if (this.role === "host") this.broadcast(payload);
+    else if (this.hostConn?.open) this.safeSend(this.hostConn, payload);
+  }
+
+  drawCursors() {
+    Object.values(this.connectedPeers).forEach((peer) => {
+      if (!Number.isFinite(peer.x) || !Number.isFinite(peer.y)) return;
+      const p = worldToScreen(peer.x, peer.y);
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.fillStyle = peer.color || "#6FCF97";
+      ctx.strokeStyle = "#0D0F17";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(14, 5);
+      ctx.lineTo(5, 14);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.font = "800 14px 'Space Mono', monospace";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      const label = peer.username || peer.peerId || "Peer";
+      const textX = 20;
+      const textY = 18;
+      const labelWidth = ctx.measureText(label).width + 16;
+      roundRectPath(textX - 8, textY - 12, labelWidth, 24, 7);
+      ctx.fillStyle = "rgba(8, 13, 24, 0.86)";
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.32)";
+      ctx.lineWidth = 1;
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "#FFFFFF";
+      ctx.fillText(label, textX, textY);
+      ctx.restore();
+    });
+  }
+
+  broadcast(payload, exceptPeerId = null) {
+    this.connections.forEach((conn, peerId) => {
+      if (peerId !== exceptPeerId) this.safeSend(conn, payload);
+    });
+  }
+
+  safeSend(conn, payload) {
+    try {
+      if (conn?.open) conn.send(payload);
+    } catch (error) {
+      console.warn("Peer send failed", error);
+    }
+  }
+
+  updateLocalPeerMeta() {
+    if (!this.localPeerId) return;
+    if (this.role === "client" && this.hostConn?.open) {
+      this.safeSend(this.hostConn, { type: "peer_meta", username: this.getUsername() });
+    }
+  }
+
+  autofillAndAutoJoinFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    const hostId = params.get("host");
+    if (!hostId) return;
+    setTimeout(() => {
+      if (this.role === "offline") this.joinSession(hostId);
+    }, 250);
+  }
+
+  updateInviteLink() {
+    return this.getHostLink();
+  }
+
+  getHostLink() {
+    const sharePeerId = this.role === "client" ? this.hostPeerId : this.localPeerId;
+    if (!sharePeerId) return "";
+    const url = new URL(window.location.href);
+    url.searchParams.set("host", sharePeerId);
+    return url.toString();
+  }
+
+  async copyHostLink() {
+    const link = this.getHostLink();
+    if (!link) {
+      this.setStatus("Host link is not ready yet.", "warn");
+      return;
+    }
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(link);
+      } else {
+        this.copyTextFallback(link);
+      }
+      this.setStatus("Host link copied. Send it to players to join.", "success");
+    } catch (error) {
+      this.copyTextFallback(link);
+      this.setStatus("Host link copied. Send it to players to join.", "success");
+    }
+  }
+
+  copyTextFallback(text) {
+    const input = document.createElement("input");
+    input.value = text;
+    input.setAttribute("readonly", "readonly");
+    input.style.position = "fixed";
+    input.style.left = "-9999px";
+    document.body.appendChild(input);
+    input.select();
+    document.execCommand("copy");
+    input.remove();
+  }
+
+  updateUi() {
+    if (el.hostSessionBtn) {
+      el.hostSessionBtn.textContent = this.role === "hosting" ? "Starting..." : "Copy host link";
+      el.hostSessionBtn.disabled = this.role === "hosting";
+    }
+    this.updateInviteLink();
+  }
+
+  setStatus(text, tone = "idle") {
+    if (el.multiplayerStatus) {
+      el.multiplayerStatus.textContent = text;
+      el.multiplayerStatus.dataset.tone = tone;
+    }
+  }
+
+  ensurePeerJs() {
+    if (typeof Peer === "undefined") {
+      alert("PeerJS failed to load. Check your network connection and reload the editor.");
+      return false;
+    }
+    return true;
+  }
+
+  closeExistingConnections() {
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.role = "offline";
+    if (this.hostConn) {
+      this.hostConn._manualClose = true;
+      this.hostConn.close();
+    }
+    this.connections.forEach((conn) => conn.close());
+    if (this.peer && !this.peer.destroyed) this.peer.destroy();
+    this.peer = null;
+    this.hostConn = null;
+    this.connections.clear();
+    this.connectedPeers = {};
+    this.localPeerId = "";
+    this.hostPeerId = "";
+    this.succession.set([]);
+  }
+
+  colorForPeer(peerId) {
+    const palette = ["#6FCF97", "#47AFFF", "#FFB020", "#FF6B9A", "#A5B8D9", "#B388FF"];
+    let hash = 0;
+    String(peerId || "peer").split("").forEach((char) => { hash = ((hash << 5) - hash) + char.charCodeAt(0); });
+    return palette[Math.abs(hash) % palette.length];
+  }
+}
+
+class SuccessionLogic {
+  constructor(manager) {
+    this.manager = manager;
+    this.list = [];
+  }
+
+  set(nextList) {
+    const unique = [];
+    (nextList || []).forEach((peerId) => {
+      if (peerId && !unique.includes(peerId)) unique.push(peerId);
+    });
+    this.list = unique;
+    this.manager.updateUi();
+  }
+
+  add(peerId) {
+    if (!this.list.includes(peerId)) this.list.push(peerId);
+  }
+
+  remove(peerId) {
+    this.list = this.list.filter((id) => id !== peerId);
+  }
+
+  handleHostLost(previousList) {
+    const localId = this.manager.localPeerId;
+    const localIndex = previousList.indexOf(localId);
+    const newHostId = previousList[1];
+    if (localIndex === 1) {
+      this.manager.promoteToHost(previousList);
+      return;
+    }
+    if (localIndex > 1 && newHostId) {
+      this.manager.joinSession(newHostId, { reconnect: true });
+      return;
+    }
+    this.manager.role = "offline";
+    this.manager.setStatus("Host disconnected and no successor was available.", "warn");
+    this.manager.updateUi();
+  }
+}
+
+class ActionValidator {
+  constructor(manager) {
+    this.manager = manager;
+  }
+
+  getTemporaryIds(before, after) {
+    const ids = { uids: {}, towerIds: {}, wallIds: {}, structureIds: {} };
+    MULTIPLAYER_COLLECTIONS.forEach((config) => {
+      const beforeMap = this.mapByUid(before?.[config.key] || []);
+      (after?.[config.key] || []).forEach((item) => {
+        if (beforeMap.has(item.uid)) return;
+        ids.uids[item.uid] = null;
+        if (config.type === "tower") ids.towerIds[item.id] = null;
+        if (config.type === "wall") ids.wallIds[item.id] = null;
+        if (config.type === "structure") ids.structureIds[item.id] = null;
+      });
+    });
+    return ids;
+  }
+
+  applyActionRequest(currentState, payload) {
+    if (!payload?.before || !payload?.after) return { valid: false, reason: "Action request is missing state snapshots." };
+    if (!this.isStateLike(payload.before) || !this.isStateLike(payload.after)) return { valid: false, reason: "Action request contains invalid state shape." };
+    const permanentIds = { uids: {}, towerIds: {}, wallIds: {}, structureIds: {} };
+    const candidate = cloneState(currentState);
+    const before = payload.before;
+    const after = payload.after;
+    if (Number(before.spawn_protection_size) !== Number(after.spawn_protection_size)) {
+      candidate.spawn_protection_size = Number(after.spawn_protection_size);
+    }
+
+    this.applyDeletes(candidate, before, after);
+    const updateError = this.applyUpdates(candidate, before, after);
+    if (updateError) return { valid: false, reason: updateError };
+    const createError = this.applyCreates(candidate, before, after, permanentIds);
+    if (createError) return { valid: false, reason: createError };
+
+    const validationError = this.validateCandidate(candidate);
+    if (validationError) return { valid: false, reason: validationError };
+    return { valid: true, state: candidate, permanentIds };
+  }
+
+  applyDeletes(candidate, before, after) {
+    MULTIPLAYER_COLLECTIONS.forEach((config) => {
+      const afterMap = this.mapByUid(after[config.key] || []);
+      (before[config.key] || []).forEach((item) => {
+        if (afterMap.has(item.uid)) return;
+        if (config.type === "tower") {
+          const tower = candidate.towers.find((existing) => existing.uid === item.uid);
+          if (tower) {
+            candidate.towers = candidate.towers.filter((existing) => existing.uid !== item.uid);
+            candidate.walls = candidate.walls.filter((wall) => wall.t1 !== tower.id && wall.t2 !== tower.id);
+          }
+        } else {
+          candidate[config.key] = candidate[config.key].filter((existing) => existing.uid !== item.uid);
+        }
+      });
+    });
+  }
+
+  applyUpdates(candidate, before, after) {
+    for (const config of MULTIPLAYER_COLLECTIONS) {
+      const beforeMap = this.mapByUid(before[config.key] || []);
+      const candidateMap = this.mapByUid(candidate[config.key] || []);
+      for (const item of after[config.key] || []) {
+        const previous = beforeMap.get(item.uid);
+        if (!previous || this.same(previous, item)) continue;
+        const current = candidateMap.get(item.uid);
+        if (!current) return `${config.type} was changed concurrently and no longer exists.`;
+        const next = this.sanitizeUpdatedItem(config.type, current, item);
+        const index = candidate[config.key].findIndex((entry) => entry.uid === item.uid);
+        candidate[config.key][index] = next;
+      }
+    }
+    return "";
+  }
+
+  applyCreates(candidate, before, after, permanentIds) {
+    const towerIdMap = new Map();
+    const createByType = (type) => {
+      const config = MULTIPLAYER_COLLECTIONS.find((item) => item.type === type);
+      const beforeMap = this.mapByUid(before[config.key] || []);
+      return (after[config.key] || []).filter((item) => !beforeMap.has(item.uid));
+    };
+
+    createByType("boundary").forEach((item) => {
+      const uid = createUid("boundary");
+      permanentIds.uids[item.uid] = uid;
+      candidate.map_boundaries.push({ uid, x: Number(item.x), y: Number(item.y) });
+    });
+    createByType("spawn").forEach((item) => {
+      const uid = createUid("spawn");
+      permanentIds.uids[item.uid] = uid;
+      candidate.spawn_points.push({ uid, team_id: Number(item.team_id), x: Number(item.x), y: Number(item.y) });
+    });
+    createByType("bomb").forEach((item) => {
+      const uid = createUid("bomb");
+      permanentIds.uids[item.uid] = uid;
+      candidate.bomb_sites.push({ uid, site_letter: String(item.site_letter || "A").toUpperCase(), x: Number(item.x), y: Number(item.y) });
+    });
+    createByType("tower").forEach((item) => {
+      const uid = createUid("tower");
+      const id = nextTowerId();
+      towerIdMap.set(item.id, id);
+      permanentIds.uids[item.uid] = uid;
+      permanentIds.towerIds[item.id] = id;
+      candidate.towers.push({
+        uid,
+        id,
+        team_id: Number(item.team_id),
+        x: Number(item.x),
+        y: Number(item.y),
+        health: clamp(1, Math.round(Number(item.health) || 5), 5),
+        is_invincible: Boolean(item.is_invincible),
+      });
+    });
+    createByType("structure").forEach((item) => {
+      const uid = createUid("structure");
+      const id = nextStructureId();
+      permanentIds.uids[item.uid] = uid;
+      permanentIds.structureIds[item.id] = id;
+      candidate.structures.push({
+        uid,
+        id,
+        x: Number(item.x),
+        y: Number(item.y),
+        size: Math.max(20, Math.round(Number(item.size) || 130)),
+        label: typeof item.label === "string" ? item.label : "BLOCK",
+        color: typeof item.color === "string" ? item.color : COLORS.red,
+        team_id: Number.isInteger(Number(item.team_id)) ? Number(item.team_id) : 1,
+      });
+    });
+    for (const item of createByType("wall")) {
+      const uid = createUid("wall");
+      const id = nextWallLocalId();
+      const t1 = towerIdMap.get(item.t1) || item.t1;
+      const t2 = towerIdMap.get(item.t2) || item.t2;
+      if (!candidate.towers.some((tower) => tower.id === t1) || !candidate.towers.some((tower) => tower.id === t2)) {
+        return "Created wall references a missing tower.";
+      }
+      permanentIds.uids[item.uid] = uid;
+      permanentIds.wallIds[item.id] = id;
+      candidate.walls.push({ uid, id, t1, t2, team_id: Number(item.team_id) });
+    }
+    return "";
+  }
+
+  sanitizeUpdatedItem(type, current, item) {
+    if (type === "tower") {
+      return {
+        ...current,
+        team_id: Number(item.team_id),
+        x: Number(item.x),
+        y: Number(item.y),
+        health: clamp(1, Math.round(Number(item.health) || current.health || 5), 5),
+        is_invincible: Boolean(item.is_invincible),
+      };
+    }
+    if (type === "wall") {
+      return { ...current, t1: Number(item.t1), t2: Number(item.t2), team_id: Number(item.team_id) };
+    }
+    if (type === "spawn") return { ...current, team_id: Number(item.team_id), x: Number(item.x), y: Number(item.y) };
+    if (type === "bomb") return { ...current, site_letter: String(item.site_letter || "A").toUpperCase(), x: Number(item.x), y: Number(item.y) };
+    if (type === "boundary") return { ...current, x: Number(item.x), y: Number(item.y) };
+    if (type === "structure") {
+      return {
+        ...current,
+        x: Number(item.x),
+        y: Number(item.y),
+        size: Math.max(20, Math.round(Number(item.size) || current.size || 130)),
+        label: typeof item.label === "string" ? item.label : current.label,
+        color: typeof item.color === "string" ? item.color : current.color,
+        team_id: Number.isInteger(Number(item.team_id)) ? Number(item.team_id) : current.team_id,
+      };
+    }
+    return { ...current, ...item, uid: current.uid };
+  }
+
+  validateCandidate(candidate) {
+    if (!this.isStateLike(candidate)) return "Candidate state is malformed.";
+    const spawnTeams = new Map();
+    for (const spawn of candidate.spawn_points) {
+      if (spawn.team_id !== 0 && spawn.team_id !== 1) return "Spawn team must be Team Blue or Team Red.";
+      spawnTeams.set(spawn.team_id, (spawnTeams.get(spawn.team_id) || 0) + 1);
+      if (spawnTeams.get(spawn.team_id) > 1) return "Only one spawn per team is allowed.";
+    }
+    const towerIds = new Set();
+    for (const tower of candidate.towers) {
+      if (!Number.isInteger(tower.id) || towerIds.has(tower.id)) return "Tower IDs must be unique integers.";
+      towerIds.add(tower.id);
+    }
+    const seenWalls = new Set();
+    for (const wall of candidate.walls) {
+      if (wall.t1 === wall.t2) return "A wall cannot connect a tower to itself.";
+      const a = candidate.towers.find((tower) => tower.id === wall.t1);
+      const b = candidate.towers.find((tower) => tower.id === wall.t2);
+      if (!a || !b) return "A wall references a missing tower.";
+      if (a.team_id !== b.team_id || wall.team_id !== a.team_id) return "Wall color must match both connected towers.";
+      const key = `${Math.min(wall.t1, wall.t2)}:${Math.max(wall.t1, wall.t2)}`;
+      if (seenWalls.has(key)) return "Duplicate walls are not allowed.";
+      seenWalls.add(key);
+    }
+    if (hasTowerOverlapConflict(null, candidate)) return "A tower overlaps another tower.";
+    if (hasMovedWallLengthConflict(null, candidate)) return `A wall exceeds ${GAME.WALL_MAX_LENGTH}.`;
+    if (hasTowerOnWallConflict(null, candidate)) return "A tower overlaps an existing wall.";
+    if (findWallOverlap(null, candidate)) return "Walls overlap or intersect.";
+    return "";
+  }
+
+  isStateLike(value) {
+    return Boolean(value)
+      && typeof value === "object"
+      && Array.isArray(value.map_boundaries)
+      && Array.isArray(value.spawn_points)
+      && Array.isArray(value.bomb_sites)
+      && Array.isArray(value.towers)
+      && Array.isArray(value.walls)
+      && Array.isArray(value.structures);
+  }
+
+  mapByUid(items) {
+    const map = new Map();
+    items.forEach((item) => { if (item?.uid) map.set(item.uid, item); });
+    return map;
+  }
+
+  same(a, b) {
+    return JSON.stringify(a) === JSON.stringify(b);
+  }
+}
+
+class RollbackHandler {
+  constructor(manager) {
+    this.manager = manager;
+    this.pending = new Map();
+  }
+
+  track(payload) {
+    this.pending.set(payload.actionId, {
+      before: cloneState(payload.before),
+      after: cloneState(payload.after),
+      temporaryIds: payload.temporaryIds || {},
+    });
+  }
+
+  resolve(actionId) {
+    if (actionId) this.pending.delete(actionId);
+  }
+
+  reject(payload) {
+    const pending = this.pending.get(payload.actionId);
+    if (pending) this.pending.delete(payload.actionId);
+    this.manager.removeHistoryAction(payload.actionId);
+    this.manager.runWithoutNetwork(() => {
+      if (payload.state) {
+        state = cloneState(payload.state);
+      } else if (pending) {
+        state = cloneState(pending.before);
+      } else {
+        this.removeTemporaryIds(payload.temporaryIds || {});
+      }
+      onStateReplaced();
+    });
+    queueRedraw();
+    setActionState(payload.reason ? `Action rejected: ${payload.reason}` : "Action rejected by host.", "warn", true);
+  }
+
+  removeTemporaryIds(temporaryIds) {
+    const uidSet = new Set(Object.keys(temporaryIds.uids || {}));
+    if (!uidSet.size) return;
+    state.map_boundaries = state.map_boundaries.filter((item) => !uidSet.has(item.uid));
+    state.spawn_points = state.spawn_points.filter((item) => !uidSet.has(item.uid));
+    state.bomb_sites = state.bomb_sites.filter((item) => !uidSet.has(item.uid));
+    state.structures = state.structures.filter((item) => !uidSet.has(item.uid));
+    const deletedTowerIds = new Set(state.towers.filter((item) => uidSet.has(item.uid)).map((tower) => tower.id));
+    state.towers = state.towers.filter((item) => !uidSet.has(item.uid));
+    state.walls = state.walls.filter((item) => !uidSet.has(item.uid) && !deletedTowerIds.has(item.t1) && !deletedTowerIds.has(item.t2));
+  }
+}
+
 restoreSavedSession();
 setup();
 
 function setup() {
   hydrateCountersFromState();
   bindUI();
+  setupMultiplayer();
   updateTeamSwatches();
   el.snapStrengthInput.value = String(editorSettings.snapStrength);
   el.buildSnapEnabledInput.checked = editorSettings.buildModeSnapEnabled;
@@ -132,6 +1086,15 @@ function frame() {
 
 function requestRender() {
   needsRender = true;
+}
+
+function queueRedraw() {
+  requestRender();
+}
+
+function setupMultiplayer() {
+  multiplayerManager = new MultiplayerManager();
+  multiplayerManager.bindUI();
 }
 
 function bindUI() {
@@ -332,6 +1295,7 @@ function onMouseDown(event) {
 function onMouseMove(event) {
   updateMousePosition(event);
   const world = interaction.mouseWorld;
+  multiplayerManager?.sendCursorMove(world);
 
   if (interaction.isPanning && interaction.panStartMouse && interaction.panStartOffset) {
     const dx = interaction.mouseScreen.x - interaction.panStartMouse.x;
@@ -1894,9 +2858,15 @@ function withAction(type, mutator) {
 }
 
 function pushHistory(type, before, after) {
-  history.undo.push({ type, before, after });
+  const entry = { type, before, after };
+  history.undo.push(entry);
   if (history.undo.length > history.limit) history.undo.shift();
   history.redo = [];
+  multiplayerManager?.handleLocalAction(type, before, after, entry);
+}
+
+function isLocalHistoryEntry(action) {
+  return action && !String(action.type || "").startsWith("REMOTE_");
 }
 
 function undoAction() {
@@ -1904,10 +2874,12 @@ function undoAction() {
     setActionState("Nothing to undo", "idle", true);
     return;
   }
+  const before = cloneState(state);
   const action = history.undo.pop();
   history.redo.push(action);
-  state = cloneState(action.before);
+  state = applyStateDelta(state, action.after, action.before);
   onStateReplaced();
+  multiplayerManager?.handleLocalAction("UNDO", before, cloneState(state));
   setActionState(`Undo: ${action.type}`, "success", true);
 }
 
@@ -1916,10 +2888,12 @@ function redoAction() {
     setActionState("Nothing to redo", "idle", true);
     return;
   }
+  const before = cloneState(state);
   const action = history.redo.pop();
   history.undo.push(action);
-  state = cloneState(action.after);
+  state = applyStateDelta(state, action.before, action.after);
   onStateReplaced();
+  multiplayerManager?.handleLocalAction("REDO", before, cloneState(state));
   setActionState(`Redo: ${action.type}`, "success", true);
 }
 
@@ -1961,8 +2935,8 @@ function restoreSavedSession() {
     const saved = JSON.parse(raw);
     if (!isSessionStateShape(saved?.state)) return;
     state = saved.state;
-    if (Array.isArray(saved?.history?.undo)) history.undo = saved.history.undo.slice(-history.limit);
-    if (Array.isArray(saved?.history?.redo)) history.redo = saved.history.redo.slice(-history.limit);
+    if (Array.isArray(saved?.history?.undo)) history.undo = saved.history.undo.filter(isLocalHistoryEntry).slice(-history.limit);
+    if (Array.isArray(saved?.history?.redo)) history.redo = saved.history.redo.filter(isLocalHistoryEntry).slice(-history.limit);
     if (Number.isFinite(saved?.editorSettings?.snapStrength)) {
       editorSettings.snapStrength = clamp(1, Math.round(saved.editorSettings.snapStrength), 500);
     }
@@ -2080,6 +3054,7 @@ function draw() {
   drawBuildGhostTower();
   drawPlacementGhost();
   drawPasteDraft();
+  multiplayerManager?.drawCursors();
   drawGuides();
   drawWallDraft();
   drawBoxSelection();
@@ -2614,6 +3589,21 @@ function drawGuideSegment(a, b, width, alpha) {
   ctx.stroke();
 }
 
+function roundRectPath(x, y, width, height, radius) {
+  const r = Math.min(radius, width / 2, height / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + width - r, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+  ctx.lineTo(x + width, y + height - r);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+  ctx.lineTo(x + r, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
 function drawWallDraft() {
   const draft = interaction.wallDraft;
   if (!draft) return;
@@ -2993,6 +3983,10 @@ function hasDuplicateWall(t1, t2) {
 
 function createUid(prefix) {
   uidSeed += 1;
+  if (multiplayerManager?.shouldUseTemporaryIds()) {
+    const safePeerId = String(multiplayerManager.localPeerId || "client").replace(/[^a-zA-Z0-9_-]/g, "");
+    return `temp_${safePeerId}_${prefix}_${uidSeed}`;
+  }
   return `${prefix}_${uidSeed}`;
 }
 function nextTowerId() {
@@ -3076,6 +4070,90 @@ function hydrateCountersFromState() {
 function cloneState(v) {
   if (typeof structuredClone === "function") return structuredClone(v);
   return JSON.parse(JSON.stringify(v));
+}
+
+function applyStateDelta(currentState, fromState, toState) {
+  const next = cloneState(currentState);
+  if (Number(fromState.spawn_protection_size) !== Number(toState.spawn_protection_size)) {
+    next.spawn_protection_size = Number(toState.spawn_protection_size);
+  }
+
+  MULTIPLAYER_COLLECTIONS.forEach((config) => {
+    const fromMap = mapItemsByUid(fromState[config.key] || []);
+    const toMap = mapItemsByUid(toState[config.key] || []);
+
+    fromMap.forEach((fromItem, uid) => {
+      if (toMap.has(uid)) return;
+      if (config.type === "tower") {
+        const tower = next.towers.find((item) => item.uid === uid);
+        if (tower) {
+          next.towers = next.towers.filter((item) => item.uid !== uid);
+          next.walls = next.walls.filter((wall) => wall.t1 !== tower.id && wall.t2 !== tower.id);
+        }
+      } else {
+        next[config.key] = next[config.key].filter((item) => item.uid !== uid);
+      }
+    });
+
+    toMap.forEach((toItem, uid) => {
+      const fromItem = fromMap.get(uid);
+      const currentIndex = next[config.key].findIndex((item) => item.uid === uid);
+      if (!fromItem) {
+        if (currentIndex === -1) next[config.key].push(cloneState(toItem));
+        return;
+      }
+      if (JSON.stringify(fromItem) === JSON.stringify(toItem)) return;
+      if (currentIndex !== -1) next[config.key][currentIndex] = cloneState(toItem);
+    });
+  });
+
+  hydrateStateIdsFromReferences(next);
+  return next;
+}
+
+function hydrateStateIdsFromReferences(mapState) {
+  const towerIds = new Set(mapState.towers.map((tower) => tower.id));
+  mapState.walls = mapState.walls.filter((wall) => towerIds.has(wall.t1) && towerIds.has(wall.t2));
+}
+
+function mapItemsByUid(items) {
+  const map = new Map();
+  items.forEach((item) => { if (item?.uid) map.set(item.uid, item); });
+  return map;
+}
+
+function rewriteStateIds(mapState, permanentIds) {
+  if (!mapState || !permanentIds) return;
+  MULTIPLAYER_COLLECTIONS.forEach((config) => {
+    (mapState[config.key] || []).forEach((item) => {
+      const uid = lookupPermanentId(permanentIds.uids, item.uid);
+      if (uid != null) item.uid = uid;
+      if (config.type === "tower") {
+        const id = lookupPermanentId(permanentIds.towerIds, item.id);
+        if (id != null) item.id = id;
+      }
+      if (config.type === "wall") {
+        const id = lookupPermanentId(permanentIds.wallIds, item.id);
+        const t1 = lookupPermanentId(permanentIds.towerIds, item.t1);
+        const t2 = lookupPermanentId(permanentIds.towerIds, item.t2);
+        if (id != null) item.id = id;
+        if (t1 != null) item.t1 = t1;
+        if (t2 != null) item.t2 = t2;
+      }
+      if (config.type === "structure") {
+        const id = lookupPermanentId(permanentIds.structureIds, item.id);
+        if (id != null) item.id = id;
+      }
+    });
+  });
+}
+
+function lookupPermanentId(map, key) {
+  if (!map) return null;
+  const stringKey = String(key);
+  if (Object.prototype.hasOwnProperty.call(map, stringKey)) return map[stringKey];
+  if (Object.prototype.hasOwnProperty.call(map, key)) return map[key];
+  return null;
 }
 
 function expectArray(value, path) {
