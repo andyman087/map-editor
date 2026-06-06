@@ -4,6 +4,8 @@ const ctx = canvas.getContext("2d");
 
 const GAME = {
   SNAP_THRESHOLD: 20,
+  ROTATION_SNAP_DEGREES: 90,
+  ROTATION_SNAP_THRESHOLD_DEGREES: 5,
   WALL_MAX_LENGTH: 1800,
   WALL_THICKNESS: 32,
   TOWER_DIAMETER: 88,
@@ -30,6 +32,7 @@ const COLORS = {
 
 const TEAM_COLORS = { "-1": COLORS.neutral, "0": COLORS.blue, "1": COLORS.red };
 const TEAM_LABELS = { "-1": "Neutral", "0": "Team Blue", "1": "Team Red" };
+const SESSION_STORAGE_KEY = "top_down_map_editor_session_v1";
 
 const el = {
   toolButtons: Array.from(document.querySelectorAll(".tool-button")),
@@ -98,6 +101,7 @@ const interaction = {
   guides: { x: null, y: null, xPoints: [], yPoints: [] },
 };
 
+restoreSavedSession();
 setup();
 
 function setup() {
@@ -107,6 +111,8 @@ function setup() {
   el.snapStrengthInput.value = String(editorSettings.snapStrength);
   el.buildSnapEnabledInput.checked = editorSettings.buildModeSnapEnabled;
   el.towerHealthInput.max = "5";
+  el.towerHealthInput.value = String(defaults.towerHealth);
+  el.towerInvincibleInput.checked = defaults.towerInvincible;
   resizeCanvas();
   setMode("select");
   renderSelectionPanel();
@@ -136,6 +142,7 @@ function bindUI() {
     swatch.addEventListener("click", () => {
       defaults.defaultTeam = parseInt(swatch.dataset.team, 10);
       updateTeamSwatches();
+      saveSession();
       setActionState(`Default color: ${TEAM_LABELS[String(defaults.defaultTeam)]}`, "success", true);
     });
   });
@@ -145,9 +152,13 @@ function bindUI() {
     if (Number.isFinite(v)) {
       defaults.towerHealth = clamp(1, v, 5);
       el.towerHealthInput.value = String(defaults.towerHealth);
+      saveSession();
     }
   });
-  el.towerInvincibleInput.addEventListener("change", () => { defaults.towerInvincible = el.towerInvincibleInput.checked; });
+  el.towerInvincibleInput.addEventListener("change", () => {
+    defaults.towerInvincible = el.towerInvincibleInput.checked;
+    saveSession();
+  });
 
   el.snapStrengthInput.addEventListener("change", () => {
     const v = Math.round(Number(el.snapStrengthInput.value));
@@ -157,10 +168,12 @@ function bindUI() {
     }
     editorSettings.snapStrength = clamp(1, v, 500);
     el.snapStrengthInput.value = String(editorSettings.snapStrength);
+    saveSession();
     setActionState(`Object snapping strength: ${editorSettings.snapStrength}`, "success", true);
   });
   el.buildSnapEnabledInput.addEventListener("change", () => {
     editorSettings.buildModeSnapEnabled = el.buildSnapEnabledInput.checked;
+    saveSession();
     setActionState(`Build mode object snapping ${editorSettings.buildModeSnapEnabled ? "enabled" : "disabled"}`, "success", true);
   });
 
@@ -776,8 +789,7 @@ function finishDrag() {
   updateCursor();
   if (!drag || !drag.moved) return;
   pushHistory("MOVE_MULTI", drag.beforeState, cloneState(state));
-  renderSelectionPanel();
-  updateInvalidObjectWarning();
+  onStateChanged();
 }
 
 function startRotate(keysToRotate, world) {
@@ -790,11 +802,14 @@ function startRotate(keysToRotate, world) {
   const center = getPositionMapCenter(startPositions);
   interaction.rotate = {
     keys: Array.from(startPositions.keys()),
+    keySet: new Set(startPositions.keys()),
     center,
     startAngle: Math.atan2(world.y - center.y, world.x - center.x),
     startPositions,
     beforeState: cloneState(state),
     moved: false,
+    invalid: false,
+    invalidReason: "",
   };
   setActionState("Rotating selection", "idle");
 }
@@ -802,7 +817,12 @@ function startRotate(keysToRotate, world) {
 function applyRotate(world) {
   const rotate = interaction.rotate;
   if (!rotate) return;
-  const angle = Math.atan2(world.y - rotate.center.y, world.x - rotate.center.x) - rotate.startAngle;
+  const rawAngle = Math.atan2(world.y - rotate.center.y, world.x - rotate.center.x) - rotate.startAngle;
+  const angle = interaction.snapTemporarilyDisabled ? rawAngle : snapAngleNear(
+    rawAngle,
+    degreesToRadians(GAME.ROTATION_SNAP_DEGREES),
+    degreesToRadians(GAME.ROTATION_SNAP_THRESHOLD_DEGREES),
+  );
   const nextPositions = new Map();
 
   rotate.startPositions.forEach((pos, key) => {
@@ -810,48 +830,40 @@ function applyRotate(world) {
     nextPositions.set(key, { x: roundTo(rotated.x, 3), y: roundTo(rotated.y, 3) });
   });
 
+  let invalidReason = "";
   const willExitBoundary = Array.from(nextPositions.entries()).some(([key, pos]) => {
     const entry = resolveKey(key);
     if (!entry || entry.type === "boundary") return false;
     return !isPlacementInsideBoundary(entry.type, pos.x, pos.y, entry.item);
   });
   if (willExitBoundary) {
-    setActionState("Cannot rotate objects outside map boundary.", "warn");
-    return;
+    invalidReason = "Selection is outside map boundary.";
   }
 
   const movedTowerTargets = getTowerTargetsFromPositionMap(nextPositions);
   if (movedTowerTargets.size > 0) {
-    if (hasMovedWallLengthConflict(movedTowerTargets)) {
-      setActionState(`Wall span clipped at ${GAME.WALL_MAX_LENGTH}`, "warn");
-      return;
-    }
-    if (hasTowerOverlapConflict(movedTowerTargets)) {
-      setActionState("A tower cannot overlap another tower.", "warn");
-      return;
-    }
-    if (hasTowerOnWallConflict(movedTowerTargets)) {
-      setActionState("A tower cannot overlap an existing wall.", "warn");
-      return;
-    }
-    if (findWallOverlap(movedTowerTargets)) {
-      setActionState("Walls cannot overlap or intersect.", "warn");
-      return;
-    }
+    if (!invalidReason && hasMovedWallLengthConflict(movedTowerTargets)) invalidReason = `Wall span exceeds ${GAME.WALL_MAX_LENGTH}.`;
+    if (!invalidReason && hasTowerOverlapConflict(movedTowerTargets)) invalidReason = "A tower overlaps another tower.";
+    if (!invalidReason && hasTowerOnWallConflict(movedTowerTargets)) invalidReason = "A tower overlaps an existing wall.";
+    if (!invalidReason && findWallOverlap(movedTowerTargets)) invalidReason = "Walls overlap or intersect.";
   }
 
+  rotate.invalid = Boolean(invalidReason);
+  rotate.invalidReason = invalidReason;
   nextPositions.forEach((pos, key) => setKeyPosition(key, pos.x, pos.y));
   rotate.moved = Math.abs(angle) > 0.001;
   updateLiveSelectionCoordinates();
+  setActionState(invalidReason || "Rotating selection", invalidReason ? "warn" : "idle");
 }
 
 function finishRotate() {
   const rotate = interaction.rotate;
+  const invalidReason = rotate && rotate.invalidReason;
   interaction.rotate = null;
   if (!rotate || !rotate.moved) return;
   pushHistory("ROTATE_MULTI", rotate.beforeState, cloneState(state));
-  renderSelectionPanel();
-  updateInvalidObjectWarning();
+  onStateChanged();
+  if (invalidReason) setActionState(`${invalidReason} Export validation may fail.`, "warn");
 }
 
 function getPositionMapCenter(positionMap) {
@@ -1410,7 +1422,7 @@ function getSnapResult(targetX, targetY, excludeKeys) {
   };
 }
 
-function getGuideCandidates(excludeKeys) {
+function getGuideCandidates(excludeKeys = new Set()) {
   const list = [];
   state.map_boundaries.forEach((p) => { if (!excludeKeys.has(makeKey("boundary", p.uid))) list.push({ x: p.x, y: p.y }); });
   state.walls.forEach((w) => {
@@ -1418,6 +1430,7 @@ function getGuideCandidates(excludeKeys) {
     const a = getTowerById(w.t1);
     const b = getTowerById(w.t2);
     if (!a || !b) return;
+    if (excludeKeys.has(makeKey("tower", a.uid)) || excludeKeys.has(makeKey("tower", b.uid))) return;
     list.push({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
   });
   state.towers.forEach((t) => { if (!excludeKeys.has(makeKey("tower", t.uid))) list.push({ x: t.x, y: t.y }); });
@@ -1833,6 +1846,7 @@ function onStateChanged() {
   renderSelectionPanel();
   el.spawnProtectionInput.value = String(state.spawn_protection_size);
   updateInvalidObjectWarning();
+  saveSession();
   requestRender();
 }
 
@@ -1853,7 +1867,66 @@ function onStateReplaced() {
   renderSelectionPanel();
   el.spawnProtectionInput.value = String(state.spawn_protection_size);
   updateInvalidObjectWarning();
+  saveSession();
   requestRender();
+}
+
+function restoreSavedSession() {
+  try {
+    const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+    if (!raw) return;
+    const saved = JSON.parse(raw);
+    if (!isSessionStateShape(saved?.state)) return;
+    state = saved.state;
+    if (Array.isArray(saved?.history?.undo)) history.undo = saved.history.undo.slice(-history.limit);
+    if (Array.isArray(saved?.history?.redo)) history.redo = saved.history.redo.slice(-history.limit);
+    if (Number.isFinite(saved?.editorSettings?.snapStrength)) {
+      editorSettings.snapStrength = clamp(1, Math.round(saved.editorSettings.snapStrength), 500);
+    }
+    if (typeof saved?.editorSettings?.buildModeSnapEnabled === "boolean") {
+      editorSettings.buildModeSnapEnabled = saved.editorSettings.buildModeSnapEnabled;
+    }
+    if ([-1, 0, 1].includes(saved?.defaults?.defaultTeam)) {
+      defaults.defaultTeam = saved.defaults.defaultTeam;
+    }
+    if (Number.isFinite(saved?.defaults?.towerHealth)) {
+      defaults.towerHealth = clamp(1, Math.round(saved.defaults.towerHealth), 5);
+    }
+    if (typeof saved?.defaults?.towerInvincible === "boolean") {
+      defaults.towerInvincible = saved.defaults.towerInvincible;
+    }
+  } catch (error) {
+    console.warn("Could not restore saved map editor session.", error);
+  }
+}
+
+function saveSession() {
+  try {
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
+      version: 1,
+      state,
+      history: {
+        undo: history.undo.slice(-history.limit),
+        redo: history.redo.slice(-history.limit),
+      },
+      editorSettings,
+      defaults,
+    }));
+  } catch (error) {
+    console.warn("Could not save map editor session.", error);
+  }
+}
+
+function isSessionStateShape(value) {
+  return Boolean(value)
+    && typeof value === "object"
+    && Array.isArray(value.map_boundaries)
+    && Array.isArray(value.spawn_points)
+    && Array.isArray(value.bomb_sites)
+    && Array.isArray(value.towers)
+    && Array.isArray(value.walls)
+    && Array.isArray(value.structures)
+    && Number.isFinite(Number(value.spawn_protection_size));
 }
 
 function sanitizeSelection() {
@@ -1879,6 +1952,20 @@ function getInvalidObjects(mapState = state) {
 
 function isObjectInvalid(type, item, mapState = state) {
   return !isPlacementInsideBoundary(type, item.x, item.y, item, mapState);
+}
+
+function isActiveRotationInvalidKey(key) {
+  return Boolean(interaction.rotate?.invalid && interaction.rotate.keySet?.has(key));
+}
+
+function isActiveRotationInvalidWall(wall) {
+  if (!interaction.rotate?.invalid) return false;
+  const a = getTowerById(wall.t1);
+  const b = getTowerById(wall.t2);
+  return Boolean(
+    (a && interaction.rotate.keySet?.has(makeKey("tower", a.uid)))
+    || (b && interaction.rotate.keySet?.has(makeKey("tower", b.uid))),
+  );
 }
 
 function updateInvalidObjectWarning() {
@@ -1977,7 +2064,7 @@ function drawStructures() {
     const size = Math.max(14, s.size * view.scale);
     const half = size / 2;
     const selected = selection.has(makeKey("structure", s.uid));
-    const invalid = isObjectInvalid("structure", s);
+    const invalid = isObjectInvalid("structure", s) || isActiveRotationInvalidKey(makeKey("structure", s.uid));
     const fillColor = invalid ? COLORS.danger : (TEAM_COLORS[String(s.team_id)] || s.color || COLORS.red);
     ctx.fillStyle = fillColor;
     ctx.globalAlpha = invalid ? 0.55 : 1.0;
@@ -2001,7 +2088,7 @@ function drawWalls() {
     if (!aTower || !bTower) return;
     const a = worldToScreen(aTower.x, aTower.y);
     const b = worldToScreen(bTower.x, bTower.y);
-    const invalid = isObjectInvalid("tower", aTower) || isObjectInvalid("tower", bTower);
+    const invalid = isObjectInvalid("tower", aTower) || isObjectInvalid("tower", bTower) || isActiveRotationInvalidWall(wall);
     const color = invalid ? COLORS.danger : getTeamColor(wall.team_id);
     ctx.lineCap = "round";
     ctx.lineWidth = 32 * view.scale;
@@ -2033,7 +2120,7 @@ function drawSpawns() {
     const spawnSize = Math.max(1, Number(state.spawn_protection_size) || 500);
     const size = spawnSize * view.scale;
     const half = size / 2;
-    const invalid = isObjectInvalid("spawn", spawn);
+    const invalid = isObjectInvalid("spawn", spawn) || isActiveRotationInvalidKey(makeKey("spawn", spawn.uid));
     const color = invalid ? COLORS.danger : getTeamColor(spawn.team_id);
     ctx.lineWidth = 4 * view.scale;
     ctx.strokeStyle = color;
@@ -2061,7 +2148,7 @@ function drawBombSites() {
   state.bomb_sites.forEach((bomb) => {
     const p = worldToScreen(bomb.x, bomb.y);
     const radius = 250 * view.scale;
-    const invalid = isObjectInvalid("bomb", bomb);
+    const invalid = isObjectInvalid("bomb", bomb) || isActiveRotationInvalidKey(makeKey("bomb", bomb.uid));
     ctx.beginPath();
     ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
     ctx.lineWidth = 8 * view.scale;
@@ -2089,7 +2176,7 @@ function drawBombSites() {
 function drawTowers() {
   state.towers.forEach((tower) => {
     const p = worldToScreen(tower.x, tower.y);
-    const invalid = isObjectInvalid("tower", tower);
+    const invalid = isObjectInvalid("tower", tower) || isActiveRotationInvalidKey(makeKey("tower", tower.uid));
     const color = getTeamColor(tower.team_id);
     const borderColor = tower.is_invincible ? "#FFD166" : color;
 
@@ -2971,6 +3058,13 @@ function rotateVector(x, y, angle) {
   const cos = Math.cos(angle);
   const sin = Math.sin(angle);
   return { x: x * cos - y * sin, y: x * sin + y * cos };
+}
+function snapAngleNear(angle, step, threshold) {
+  const snapped = Math.round(angle / step) * step;
+  return Math.abs(angle - snapped) <= threshold ? snapped : angle;
+}
+function degreesToRadians(degrees) {
+  return degrees * (Math.PI / 180);
 }
 function rotatePoint(x, y, cx, cy, angle) {
   const rotated = rotateVector(x - cx, y - cy, angle);
