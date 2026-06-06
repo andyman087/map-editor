@@ -21,6 +21,7 @@ const COLORS = {
   gridMinor: "#2E3842",
   gridMajor: "#2E3842",
   boundary: "#2E3842",
+  boundaryFog: "rgba(2, 6, 14, 0.62)",
   blue: "#3D5DFF",
   red: "#FF3D3D",
   neutral: "#667380",
@@ -62,6 +63,7 @@ const el = {
   usernameInput: document.getElementById("usernameInput"),
   hostSessionBtn: document.getElementById("hostSessionBtn"),
   multiplayerStatus: document.getElementById("multiplayerStatus"),
+  multiplayerToastStack: document.getElementById("multiplayerToastStack"),
   towerHealthInput: document.getElementById("towerHealthInput"),
   towerInvincibleInput: document.getElementById("towerInvincibleInput"),
   actionState: document.getElementById("actionState"),
@@ -136,6 +138,14 @@ class MultiplayerManager {
     this.isApplyingRemote = false;
     this.lastCursorSentAt = 0;
     this.retryTimer = null;
+    this.heartbeatTimer = null;
+    this.hostWatchTimer = null;
+    this.lastHostHeartbeatAt = 0;
+    this.migrationInProgress = false;
+    this.reconnectTarget = "";
+    this.reconnectAttempts = 0;
+    this.maxReconnectAttempts = 24;
+    this.lastToast = { text: "", at: 0 };
     this.succession = new SuccessionLogic(this);
     this.validator = new ActionValidator(this);
     this.rollback = new RollbackHandler(this);
@@ -187,6 +197,7 @@ class MultiplayerManager {
       this.succession.set([id]);
       this.updateLocalPeerMeta();
       this.updateInviteLink();
+      this.startHostServices();
       this.updateUi();
       if (options.copyOnOpen) this.copyHostLink();
       else this.setStatus("Hosting. Use Copy host link to invite others.", "success");
@@ -203,6 +214,9 @@ class MultiplayerManager {
     if (!options.reconnect) this.closeExistingConnections();
     this.role = "client";
     this.hostPeerId = cleanHostId;
+    this.startHostWatchdog();
+    this.stopHostServices();
+    this.lastHostHeartbeatAt = Date.now();
     this.setStatus(options.reconnect ? `Reconnecting to new host ${cleanHostId}...` : `Joining ${cleanHostId}...`);
     if (!this.peer || this.peer.destroyed) {
       this.peer = new Peer();
@@ -224,6 +238,17 @@ class MultiplayerManager {
 
   connectToHost(hostId, options = {}) {
     if (!this.peer || !this.peer.open) return;
+    if (options.reconnect) {
+      this.reconnectTarget = hostId;
+      this.reconnectAttempts += 1;
+      if (this.reconnectAttempts > this.maxReconnectAttempts) {
+        this.role = "offline";
+        this.migrationInProgress = false;
+        this.setStatus("Session disconnected. Host migration could not reconnect.", "error");
+        this.updateUi();
+        return;
+      }
+    }
     if (this.hostConn) {
       this.hostConn._manualClose = true;
       this.hostConn.close();
@@ -231,17 +256,22 @@ class MultiplayerManager {
     this.hostPeerId = hostId;
     const conn = this.peer.connect(hostId, {
       reliable: true,
-      metadata: { username: this.getUsername() },
+      metadata: {
+        username: this.getUsername(),
+        migration: Boolean(options.reconnect),
+        previousHostId: options.previousHostId || "",
+      },
     });
     this.hostConn = conn;
     let handledClose = false;
     conn.on("open", () => {
-      if (this.retryTimer) {
-        clearTimeout(this.retryTimer);
-        this.retryTimer = null;
-      }
-      this.setStatus(`Connected to host ${hostId}. Waiting for map state...`);
+      this.lastHostHeartbeatAt = Date.now();
+      this.safeSend(conn, { type: "peer_meta", username: this.getUsername() });
+      this.setStatus(`Connected to host ${hostId}. Waiting for map state...`, options.reconnect ? "success" : "idle");
       this.updateUi();
+      if (options.reconnect) {
+        this.scheduleReconnect(hostId, "Waiting for migrated host to send map state...");
+      }
     });
     conn.on("data", (payload) => this.handleHostData(payload));
     conn.on("close", () => {
@@ -257,26 +287,42 @@ class MultiplayerManager {
       this.handleHostConnectionLost();
     });
     if (options.reconnect) {
-      this.retryTimer = setTimeout(() => {
-        if (this.role === "client" && (!this.hostConn || !this.hostConn.open)) {
-          this.connectToHost(hostId, options);
-        }
-      }, 1200);
+      this.scheduleReconnect(hostId, "Trying the next host again...");
     }
   }
 
   promoteToHost(previousList) {
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    this.stopHostWatchdog();
+    if (this.hostConn) {
+      this.hostConn._manualClose = true;
+      this.hostConn.close();
+    }
     this.role = "host";
     this.hostPeerId = this.localPeerId;
     this.hostConn = null;
     this.connections.clear();
     this.connectedPeers = {};
+    this.migrationInProgress = false;
+    this.reconnectTarget = "";
+    this.reconnectAttempts = 0;
+    if (this.peer?.disconnected && !this.peer.destroyed) {
+      try {
+        this.peer.reconnect();
+      } catch (error) {
+        console.warn("Peer reconnect during host migration failed", error);
+      }
+    }
     const nextList = [this.localPeerId, ...previousList.slice(2).filter((id) => id !== this.localPeerId)];
     this.succession.set(nextList);
     this.updateLocalPeerMeta();
     this.updateInviteLink();
+    this.startHostServices();
     this.updateUi();
-    this.setStatus("Host disconnected. You are now the host.", "success");
+    this.setStatus("Host migrated. You are now the host.", "success");
   }
 
   attachPeerEvents() {
@@ -292,6 +338,11 @@ class MultiplayerManager {
       return;
     }
     const peerId = conn.peer;
+    const existing = this.connections.get(peerId);
+    if (existing && existing !== conn) {
+      existing._manualClose = true;
+      existing.close();
+    }
     this.connections.set(peerId, conn);
     this.connectedPeers[peerId] = {
       peerId,
@@ -304,27 +355,37 @@ class MultiplayerManager {
       this.sendFullState(conn);
       this.broadcastSuccession();
       this.broadcastPeerList();
-      this.setStatus(`Peer joined: ${this.connectedPeers[peerId].username}`);
+      const joinedFromMigration = conn.metadata?.migration ? " after host migration" : "";
+      this.setStatus(`Peer joined${joinedFromMigration}: ${this.connectedPeers[peerId].username}`, "success");
     });
     conn.on("data", (payload) => this.handleClientData(conn, payload));
-    conn.on("close", () => this.removeClient(peerId));
-    conn.on("error", () => this.removeClient(peerId));
+    conn.on("close", () => this.removeClient(peerId, conn));
+    conn.on("error", () => this.removeClient(peerId, conn));
   }
 
-  removeClient(peerId) {
+  removeClient(peerId, conn = null) {
+    if (conn && this.connections.get(peerId) !== conn) return;
     if (!this.connections.has(peerId) && !this.connectedPeers[peerId]) return;
+    const username = this.connectedPeers[peerId]?.username || peerId;
     this.connections.delete(peerId);
     delete this.connectedPeers[peerId];
     this.succession.remove(peerId);
     this.broadcastSuccession();
     this.broadcastPeerList();
-    this.setStatus(`Peer left: ${peerId}`);
+    this.setStatus(`Peer left: ${username}`, "warn");
   }
 
-  handleHostConnectionLost() {
+  handleHostConnectionLost(reason = "Host connection lost.") {
     if (this.role !== "client") return;
+    if (this.migrationInProgress) return;
+    this.migrationInProgress = true;
     const list = this.succession.list.slice();
-    this.setStatus("Host connection lost. Checking succession list...", "warn");
+    if (this.hostConn) {
+      this.hostConn._manualClose = true;
+      this.hostConn.close();
+      this.hostConn = null;
+    }
+    this.setStatus(`${reason} Checking host succession...`, "warn");
     this.succession.handleHostLost(list);
   }
 
@@ -347,12 +408,17 @@ class MultiplayerManager {
   handleHostData(payload) {
     if (!payload || typeof payload !== "object") return;
     if (payload.type === "full_state") this.applyFullState(payload);
+    else if (payload.type === "host_heartbeat") this.receiveHostHeartbeat(payload);
     else if (payload.type === "succession_update") this.succession.set(payload.successionList || []);
     else if (payload.type === "peer_list") this.applyPeerList(payload.peers || {});
     else if (payload.type === "action_commit") this.applyActionCommit(payload);
     else if (payload.type === "action_reject") this.rollback.reject(payload);
     else if (payload.type === "cursor_move") this.receiveRemoteCursor(payload);
-    else if (payload.type === "join_reject") this.setStatus(payload.reason || "Join rejected.", "warn");
+    else if (payload.type === "join_reject") {
+      const reason = payload.reason || "Join rejected.";
+      this.setStatus(reason, "warn");
+      if (this.migrationInProgress && this.hostPeerId) this.scheduleReconnect(this.hostPeerId, reason);
+    }
   }
 
   enqueueActionRequest(conn, payload) {
@@ -394,7 +460,7 @@ class MultiplayerManager {
       permanentIds: result.permanentIds,
       state: cloneState(state),
     });
-    this.setStatus(`Committed ${payload.actionType || "remote action"}`, "success");
+    this.setStatus(`Committed ${payload.actionType || "remote action"}`, "success", { toast: false });
   }
 
   handleLocalAction(type, before, after, historyEntry = null) {
@@ -430,6 +496,14 @@ class MultiplayerManager {
   }
 
   applyFullState(payload) {
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    this.migrationInProgress = false;
+    this.reconnectTarget = "";
+    this.reconnectAttempts = 0;
+    this.lastHostHeartbeatAt = Date.now();
     if (payload.successionList) this.succession.set(payload.successionList);
     if (payload.peers) this.applyPeerList(payload.peers);
     this.applyAuthoritativeState(payload.state);
@@ -440,7 +514,7 @@ class MultiplayerManager {
     this.rewriteHistoryIds(payload);
     this.rollback.resolve(payload.actionId);
     this.applyAuthoritativeState(payload.state);
-    this.setStatus(`Synced ${payload.actionType || "remote action"}`, "success");
+    this.setStatus(`Synced ${payload.actionType || "remote action"}`, "success", { toast: false });
   }
 
   removeHistoryAction(actionId) {
@@ -481,10 +555,67 @@ class MultiplayerManager {
   sendFullState(conn) {
     this.safeSend(conn, {
       type: "full_state",
+      hostId: this.localPeerId,
       state: cloneState(state),
       successionList: this.succession.list.slice(),
       peers: this.getPeerSnapshot(),
     });
+  }
+
+  startHostServices() {
+    this.stopHostWatchdog();
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.sendHostHeartbeat();
+    this.heartbeatTimer = setInterval(() => this.sendHostHeartbeat(), 1000);
+  }
+
+  stopHostServices() {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+  }
+
+  sendHostHeartbeat() {
+    if (this.role !== "host") return;
+    this.broadcast({
+      type: "host_heartbeat",
+      hostId: this.localPeerId,
+      successionList: this.succession.list.slice(),
+      timestamp: Date.now(),
+    });
+  }
+
+  receiveHostHeartbeat(payload) {
+    this.lastHostHeartbeatAt = Date.now();
+    if (payload.successionList) this.succession.set(payload.successionList);
+  }
+
+  startHostWatchdog() {
+    if (this.hostWatchTimer) return;
+    this.hostWatchTimer = setInterval(() => {
+      if (this.role !== "client") return;
+      if (this.migrationInProgress) return;
+      const missingFor = Date.now() - this.lastHostHeartbeatAt;
+      if (missingFor > 4200) {
+        this.handleHostConnectionLost("Host heartbeat timed out.");
+      }
+    }, 900);
+  }
+
+  stopHostWatchdog() {
+    if (this.hostWatchTimer) clearInterval(this.hostWatchTimer);
+    this.hostWatchTimer = null;
+  }
+
+  scheduleReconnect(hostId, reason = "Trying the migrated host again...") {
+    if (!hostId || this.role !== "client") return;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      if (this.role !== "client") return;
+      if (!this.migrationInProgress && this.hostConn?.open) return;
+      this.setStatus(`${reason} Reconnect attempt ${this.reconnectAttempts + 1}/${this.maxReconnectAttempts}.`, "warn");
+      this.connectToHost(hostId, { reconnect: true, previousHostId: this.succession.list[0] || "" });
+    }, 1200);
   }
 
   broadcastSuccession() {
@@ -520,6 +651,8 @@ class MultiplayerManager {
   }
 
   applyPeerList(peers) {
+    const previousPeers = { ...this.connectedPeers };
+    const previousIds = new Set(Object.keys(previousPeers));
     this.connectedPeers = {};
     Object.entries(peers).forEach(([peerId, info]) => {
       if (peerId === this.localPeerId) return;
@@ -532,6 +665,19 @@ class MultiplayerManager {
         y: info.y,
       };
     });
+    const nextIds = new Set(Object.keys(this.connectedPeers));
+    if (previousIds.size) {
+      nextIds.forEach((peerId) => {
+        if (!previousIds.has(peerId)) {
+          this.setStatus(`Peer joined: ${this.connectedPeers[peerId]?.username || peerId}`, "success");
+        }
+      });
+      previousIds.forEach((peerId) => {
+        if (!nextIds.has(peerId)) {
+          this.setStatus(`Peer left: ${previousPeers[peerId]?.username || peerId}`, "warn");
+        }
+      });
+    }
     queueRedraw();
   }
 
@@ -698,11 +844,44 @@ class MultiplayerManager {
     this.updateInviteLink();
   }
 
-  setStatus(text, tone = "idle") {
+  setStatus(text, tone = "idle", options = {}) {
     if (el.multiplayerStatus) {
       el.multiplayerStatus.textContent = text;
       el.multiplayerStatus.dataset.tone = tone;
     }
+    const shouldToast = options.toast ?? true;
+    if (shouldToast) this.showStatusToast(text, tone === "idle" ? "info" : tone);
+  }
+
+  showStatusToast(text, tone = "info") {
+    if (!el.multiplayerToastStack || !text) return;
+    const now = performance.now();
+    if (this.lastToast.text === text && now - this.lastToast.at < 900) return;
+    this.lastToast = { text, at: now };
+
+    const toast = document.createElement("div");
+    toast.className = "multiplayer-toast";
+    toast.dataset.tone = tone;
+
+    const title = document.createElement("strong");
+    title.textContent = this.labelForStatusTone(tone);
+    const body = document.createElement("span");
+    body.textContent = text;
+    toast.append(title, body);
+
+    el.multiplayerToastStack.appendChild(toast);
+    while (el.multiplayerToastStack.children.length > 4) {
+      el.multiplayerToastStack.firstElementChild?.remove();
+    }
+    window.setTimeout(() => toast.classList.add("is-hiding"), 3800);
+    window.setTimeout(() => toast.remove(), 4300);
+  }
+
+  labelForStatusTone(tone) {
+    if (tone === "success") return "Session update";
+    if (tone === "warn") return "Connection warning";
+    if (tone === "error") return "Session error";
+    return "Multiplayer";
   }
 
   ensurePeerJs() {
@@ -716,12 +895,20 @@ class MultiplayerManager {
   closeExistingConnections() {
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
+    this.stopHostServices();
+    this.stopHostWatchdog();
+    this.migrationInProgress = false;
+    this.reconnectTarget = "";
+    this.reconnectAttempts = 0;
     this.role = "offline";
     if (this.hostConn) {
       this.hostConn._manualClose = true;
       this.hostConn.close();
     }
-    this.connections.forEach((conn) => conn.close());
+    this.connections.forEach((conn) => {
+      conn._manualClose = true;
+      conn.close();
+    });
     if (this.peer && !this.peer.destroyed) this.peer.destroy();
     this.peer = null;
     this.hostConn = null;
@@ -772,11 +959,15 @@ class SuccessionLogic {
       return;
     }
     if (localIndex > 1 && newHostId) {
-      this.manager.joinSession(newHostId, { reconnect: true });
+      this.manager.reconnectTarget = newHostId;
+      this.manager.reconnectAttempts = 0;
+      this.manager.setStatus(`Host migrated. Connecting to successor ${newHostId}...`, "warn");
+      this.manager.joinSession(newHostId, { reconnect: true, previousHostId: previousList[0] || "" });
       return;
     }
     this.manager.role = "offline";
-    this.manager.setStatus("Host disconnected and no successor was available.", "warn");
+    this.manager.migrationInProgress = false;
+    this.manager.setStatus("Host disconnected and no successor was available.", "error");
     this.manager.updateUi();
   }
 }
@@ -1046,6 +1237,7 @@ class RollbackHandler {
     });
     queueRedraw();
     setActionState(payload.reason ? `Action rejected: ${payload.reason}` : "Action rejected by host.", "warn", true);
+    this.manager.setStatus(payload.reason ? `Action rejected: ${payload.reason}` : "Action rejected by host.", "warn");
   }
 
   removeTemporaryIds(temporaryIds) {
@@ -3140,6 +3332,7 @@ function draw() {
   ctx.fillStyle = COLORS.bg;
   ctx.fillRect(0, 0, viewport.width, viewport.height);
   drawGrid();
+  drawBoundaryFogMask();
   drawBoundary();
   drawBombSites();
   drawStructures();
@@ -3183,6 +3376,25 @@ function drawGrid() {
     ctx.lineTo(viewport.width, sy);
     ctx.stroke();
   }
+}
+
+function drawBoundaryFogMask() {
+  if (state.map_boundaries.length < 3) return;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, viewport.width, viewport.height);
+
+  state.map_boundaries.forEach((point, i) => {
+    const p = worldToScreen(point.x, point.y);
+    if (i === 0) ctx.moveTo(p.x, p.y);
+    else ctx.lineTo(p.x, p.y);
+  });
+  ctx.closePath();
+
+  ctx.fillStyle = COLORS.boundaryFog;
+  ctx.fill("evenodd");
+  ctx.restore();
 }
 
 function drawBoundary() {
