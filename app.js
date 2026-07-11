@@ -4076,7 +4076,7 @@ function importMap(event) {
       if (!isDeflyText && !isJson) throw new Error("Choose a .json or .txt map file.");
 
       const parsed = isDeflyText ? convertDeflyMap(contents) : JSON.parse(contents);
-      const imported = parseImportedState(parsed);
+      const imported = parseImportedState(parsed, { allowGeometryConflicts: isDeflyText });
       const before = cloneState(state);
       state = imported;
       pushHistory("IMPORT_JSON", before, cloneState(state));
@@ -4096,7 +4096,8 @@ function importMap(event) {
   reader.readAsText(file);
 }
 
-function parseImportedState(data) {
+function parseImportedState(data, options = {}) {
+  const allowGeometryConflicts = options.allowGeometryConflicts === true;
   if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Root must be an object.");
   const mapRaw = expectArray(data.map_boundaries, "map_boundaries");
   const spawnRaw = expectArray(data.spawn_points, "spawn_points");
@@ -4159,8 +4160,8 @@ function parseImportedState(data) {
       throw new Error("Every wall and its connected towers must share the same team color.");
     }
   });
-  if (findWallOverlap(null, imported)) throw new Error("Walls cannot overlap or intersect.");
-  if (hasTowerOnWallConflict(null, imported)) throw new Error("A tower overlaps an existing wall.");
+  if (!allowGeometryConflicts && findWallOverlap(null, imported)) throw new Error("Walls cannot overlap or intersect.");
+  if (!allowGeometryConflicts && hasTowerOnWallConflict(null, imported)) throw new Error("A tower overlaps an existing wall.");
 
   return imported;
 }

@@ -181,9 +181,6 @@ function convertDeflyMap(deflyText, scale = 100, spawnProtectionSize = 500) {
   if (source.width <= 0 || source.height <= 0) {
     throw new Error("MAP_WIDTH and MAP_HEIGHT must be positive.");
   }
-  if (source.bombSites.size !== 2 || !source.bombSites.has(0) || !source.bombSites.has(1)) {
-    throw new Error("The target needs exactly bomb sites 0 (A) and 1 (B).");
-  }
   if (source.spawns.size !== 2 || !source.spawns.has(0) || !source.spawns.has(1)) {
     throw new Error("The target needs exactly one team-1 and team-2 spawn.");
   }
