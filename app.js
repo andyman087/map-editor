@@ -1430,7 +1430,7 @@ function bindUI() {
 
   el.exportBtn.addEventListener("click", exportJSON);
   el.importBtn.addEventListener("click", () => el.importFileInput.click());
-  el.importFileInput.addEventListener("change", importJSON);
+  el.importFileInput.addEventListener("change", importMap);
 
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   canvas.addEventListener("mousedown", onMouseDown);
@@ -4063,19 +4063,25 @@ function validateForExport(mapState = state) {
   return null;
 }
 
-function importJSON(event) {
+function importMap(event) {
   const file = event.target.files && event.target.files[0];
   if (!file) return;
   const reader = new FileReader();
   reader.onload = () => {
     try {
-      const parsed = JSON.parse(String(reader.result));
+      const contents = String(reader.result);
+      const fileName = file.name.toLowerCase();
+      const isDeflyText = fileName.endsWith(".txt");
+      const isJson = fileName.endsWith(".json");
+      if (!isDeflyText && !isJson) throw new Error("Choose a .json or .txt map file.");
+
+      const parsed = isDeflyText ? convertDeflyMap(contents) : JSON.parse(contents);
       const imported = parseImportedState(parsed);
       const before = cloneState(state);
       state = imported;
       pushHistory("IMPORT_JSON", before, cloneState(state));
       onStateReplaced();
-      setActionState("JSON imported", "success", true);
+      setActionState(isDeflyText ? "Defly TXT imported" : "JSON imported", "success", true);
     } catch (error) {
       alert(`Import failed: ${error.message}`);
       setActionState("Import failed", "error", true);
