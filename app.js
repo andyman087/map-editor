@@ -1482,7 +1482,7 @@ function bindUI() {
 
   el.exportBtn.addEventListener("click", exportJSON);
   el.importBtn.addEventListener("click", () => el.importFileInput.click());
-  el.importFileInput.addEventListener("change", importJSON);
+  el.importFileInput.addEventListener("change", importMap);
 
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   canvas.addEventListener("mousedown", onMouseDown);
@@ -4309,13 +4309,19 @@ function validateForExport(mapState = state) {
   return report.issues.length ? `Validation error: ${report.issues[0].message}` : null;
 }
 
-function importJSON(event) {
+function importMap(event) {
   const file = event.target.files && event.target.files[0];
   if (!file) return;
   const reader = new FileReader();
   reader.onload = () => {
     try {
-      const parsed = JSON.parse(String(reader.result));
+      const contents = String(reader.result);
+      const fileName = file.name.toLowerCase();
+      const isDeflyText = fileName.endsWith(".txt");
+      const isJson = fileName.endsWith(".json");
+      if (!isDeflyText && !isJson) throw new Error("Choose a .json or .txt map file.");
+
+      const parsed = isDeflyText ? convertDeflyMap(contents) : JSON.parse(contents);
       const convertedHealthCount = Array.isArray(parsed?.towers)
         ? parsed.towers.filter((tower) => Number(tower?.health) > GAME.TOWER_MAX_HEALTH).length
         : 0;
@@ -4328,11 +4334,12 @@ function importJSON(event) {
       const conversionNote = convertedHealthCount
         ? ` Converted ${convertedHealthCount} tower${convertedHealthCount === 1 ? "" : "s"} from 5 HP to ${GAME.TOWER_MAX_HEALTH} HP.`
         : "";
+      const importLabel = isDeflyText ? "Defly TXT" : "JSON";
       if (report.issues.length) {
         const additional = report.issues.length > 1 ? ` (+${report.issues.length - 1} more)` : "";
-        setActionState(`JSON imported with validation issues.${conversionNote} ${report.issues[0].message}${additional}`, "warn");
+        setActionState(`${importLabel} imported with validation issues.${conversionNote} ${report.issues[0].message}${additional}`, "warn");
       } else {
-        setActionState(`JSON imported.${conversionNote}`.trim(), "success", true);
+        setActionState(`${importLabel} imported.${conversionNote}`.trim(), "success", true);
       }
     } catch (error) {
       alert(`Import failed: ${error.message}`);
@@ -4398,7 +4405,6 @@ function parseImportedState(data) {
   imported.walls.forEach((w) => {
     if (!towerIds.has(w.t1) || !towerIds.has(w.t2)) throw new Error("Wall references a missing tower id.");
   });
-
   return imported;
 }
 
