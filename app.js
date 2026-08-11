@@ -6,7 +6,6 @@ const GAME = {
   SNAP_THRESHOLD: 20,
   ROTATION_SNAP_DEGREES: 45,
   ROTATION_SNAP_THRESHOLD_DEGREES: 5,
-  WALL_MAX_LENGTH: 1800,
   WALL_THICKNESS: 32,
   TOWER_DIAMETER: 70.4,
   TOWER_MAX_HEALTH: 4,
@@ -1011,7 +1010,7 @@ class ActionValidator {
     const createError = this.applyCreates(candidate, before, after, permanentIds);
     if (createError) return { valid: false, reason: createError };
 
-    const validationError = this.validateCandidate(candidate);
+    const validationError = this.validateCandidate(candidate, currentState);
     if (validationError) return { valid: false, reason: validationError };
     return { valid: true, state: candidate, permanentIds };
   }
@@ -1152,7 +1151,7 @@ class ActionValidator {
     return { ...current, ...item, uid: current.uid };
   }
 
-  validateCandidate(candidate) {
+  validateCandidate(candidate, previousState = null) {
     if (!this.isStateLike(candidate)) return "Candidate state is malformed.";
     const spawnTeams = new Map();
     for (const spawn of candidate.spawn_points) {
@@ -1176,10 +1175,12 @@ class ActionValidator {
       if (seenWalls.has(key)) return "Duplicate walls are not allowed.";
       seenWalls.add(key);
     }
-    if (hasTowerOverlapConflict(null, candidate)) return "A tower overlaps another tower.";
-    if (hasMovedWallLengthConflict(null, candidate)) return `A wall exceeds ${GAME.WALL_MAX_LENGTH}.`;
-    if (hasTowerOnWallConflict(null, candidate)) return "A tower overlaps an existing wall.";
-    if (findWallOverlap(null, candidate)) return "Walls overlap or intersect.";
+    const previousTowerOverlaps = previousState ? getTowerOverlapSignatures(null, previousState) : new Set();
+    const previousTowerWallConflicts = previousState ? getTowerWallConflictSignatures(null, previousState) : new Set();
+    const previousWallOverlaps = previousState ? getWallOverlapSignatures(null, previousState) : new Set();
+    if (hasNewConflict(getTowerOverlapSignatures(null, candidate), previousTowerOverlaps)) return "A tower overlaps another tower.";
+    if (hasNewConflict(getTowerWallConflictSignatures(null, candidate), previousTowerWallConflicts)) return "A tower overlaps an existing wall.";
+    if (hasNewConflict(getWallOverlapSignatures(null, candidate), previousWallOverlaps)) return "Walls overlap or intersect.";
     return "";
   }
 
@@ -1721,66 +1722,7 @@ function onMouseMove(event) {
     interaction.placementGhost = null;
     interaction.guides = { x: null, y: null, xPoints: [], yPoints: [] };
   }
-  updateDraftLengthWarnings();
   if (interaction.mode === "build") requestRender();
-}
-
-function updateDraftLengthWarnings() {
-  if (interaction.mode === "wall" && interaction.wallDraft) {
-    const startTower = getTowerById(interaction.wallDraft.startTowerId);
-    if (startTower) {
-      const hoverTower = interaction.hoverTowerId ? getTowerById(interaction.hoverTowerId) : null;
-      const rawTarget = hoverTower && hoverTower.id !== startTower.id
-        ? { x: hoverTower.x, y: hoverTower.y }
-        : interaction.wallDraft.mouse;
-      const length = distance(startTower.x, startTower.y, rawTarget.x, rawTarget.y);
-      const tooLong = length > GAME.WALL_MAX_LENGTH;
-      if (tooLong && !interaction.wallDraftWarnActive) {
-        setActionState(`Wall exceeds max length (${Math.round(length)})`, "error");
-        interaction.wallDraftWarnActive = true;
-      }
-      if (!tooLong && interaction.wallDraftWarnActive) {
-        setActionState("Idle", "idle");
-        interaction.wallDraftWarnActive = false;
-      }
-      return;
-    }
-  }
-  if (interaction.wallDraftWarnActive) {
-    interaction.wallDraftWarnActive = false;
-    setActionState("Idle", "idle");
-  }
-
-  if (interaction.mode !== "build") {
-    if (interaction.towerDraftWarnActive) {
-      interaction.towerDraftWarnActive = false;
-      setActionState("Idle", "idle");
-    }
-    return;
-  }
-  const startTower = getAutoWallStartTower();
-  if (!startTower) {
-    if (interaction.towerDraftWarnActive) {
-      interaction.towerDraftWarnActive = false;
-      setActionState("Idle", "idle");
-    }
-    return;
-  }
-  const hoverTower = interaction.hoverTowerId ? getTowerById(interaction.hoverTowerId) : null;
-  const snappedTarget = interaction.buildGhost || getBuildPlacementTarget(interaction.mouseWorld, startTower);
-  const rawTarget = hoverTower && hoverTower.id !== startTower.id
-    ? { x: hoverTower.x, y: hoverTower.y }
-    : snappedTarget;
-  const length = distance(startTower.x, startTower.y, rawTarget.x, rawTarget.y);
-  const tooLong = length > GAME.WALL_MAX_LENGTH;
-  if (tooLong && !interaction.towerDraftWarnActive) {
-    setActionState(`Wall exceeds max length (${Math.round(length)})`, "error");
-    interaction.towerDraftWarnActive = true;
-  }
-  if (!tooLong && interaction.towerDraftWarnActive) {
-    setActionState("Idle", "idle");
-    interaction.towerDraftWarnActive = false;
-  }
 }
 
 function refreshPlacementPreviewFromMouse() {
@@ -2004,6 +1946,9 @@ function startDrag(keysToDrag, primaryKey, world) {
     startMouse: { ...world },
     startPositions,
     beforeState: cloneState(state),
+    initialTowerOverlaps: getTowerOverlapSignatures(),
+    initialTowerWallConflicts: getTowerWallConflictSignatures(),
+    initialWallOverlaps: getWallOverlapSignatures(),
     moved: false,
   };
   updateCursor();
@@ -2022,11 +1967,8 @@ function applyDrag(world) {
   const snap = interaction.snapEnabled && !interaction.snapTemporarilyDisabled
     ? getSnapResult(targetX, targetY, new Set(drag.keys))
     : { x: targetX, y: targetY, guideX: null, guideY: null, xPoints: [], yPoints: [] };
-  let dx = snap.x - anchorStart.x;
-  let dy = snap.y - anchorStart.y;
-  const clipped = constrainDeltaByWallLimit(dx, dy, drag);
-  dx = clipped.dx;
-  dy = clipped.dy;
+  const dx = snap.x - anchorStart.x;
+  const dy = snap.y - anchorStart.y;
 
   const willExitBoundary = Array.from(drag.startPositions.entries()).some(([key, pos]) => {
     const entry = resolveKey(key);
@@ -2044,11 +1986,15 @@ function applyDrag(world) {
 
   const movedTowerTargets = getMovedTowerTargets(drag, dx, dy);
   if (movedTowerTargets.size > 0) {
-    if (hasTowerOnWallConflict(movedTowerTargets)) {
+    if (hasNewConflict(getTowerOverlapSignatures(movedTowerTargets), drag.initialTowerOverlaps)) {
+      setActionState("A tower cannot overlap another tower.", "warn");
+      return;
+    }
+    if (hasNewConflict(getTowerWallConflictSignatures(movedTowerTargets), drag.initialTowerWallConflicts)) {
       setActionState("A tower cannot overlap an existing wall.", "warn");
       return;
     }
-    if (findWallOverlap(movedTowerTargets)) {
+    if (hasNewConflict(getWallOverlapSignatures(movedTowerTargets), drag.initialWallOverlaps)) {
       setActionState("Walls cannot overlap or intersect.", "warn");
       return;
     }
@@ -2058,45 +2004,6 @@ function applyDrag(world) {
   interaction.guides = { x: snap.guideX, y: snap.guideY, xPoints: snap.xPoints, yPoints: snap.yPoints };
   drag.moved = Math.hypot(dx, dy) > 0.001;
   updateLiveSelectionCoordinates();
-  if (clipped.clipped) setActionState(`Wall span clipped at ${GAME.WALL_MAX_LENGTH}`, "warn");
-}
-
-function constrainDeltaByWallLimit(dx, dy, drag) {
-  const movedTowerIds = new Set();
-  drag.keys.forEach((key) => {
-    const entry = resolveKey(key);
-    if (entry && entry.type === "tower") movedTowerIds.add(entry.item.id);
-  });
-  if (movedTowerIds.size === 0) return { dx, dy, clipped: false };
-
-  const test = (scale) => {
-    for (const wall of state.walls) {
-      const ta = getTowerById(wall.t1);
-      const tb = getTowerById(wall.t2);
-      if (!ta || !tb) continue;
-      const pa = movedTowerIds.has(ta.id) ? getDraggedTowerPos(ta, drag, dx, dy, scale) : { x: ta.x, y: ta.y };
-      const pb = movedTowerIds.has(tb.id) ? getDraggedTowerPos(tb, drag, dx, dy, scale) : { x: tb.x, y: tb.y };
-      if (distance(pa.x, pa.y, pb.x, pb.y) > GAME.WALL_MAX_LENGTH + 0.0001) return false;
-    }
-    return true;
-  };
-
-  if (test(1)) return { dx, dy, clipped: false };
-  let lo = 0;
-  let hi = 1;
-  for (let i = 0; i < 14; i += 1) {
-    const mid = (lo + hi) / 2;
-    if (test(mid)) lo = mid;
-    else hi = mid;
-  }
-  return { dx: dx * lo, dy: dy * lo, clipped: true };
-}
-
-function getDraggedTowerPos(tower, drag, dx, dy, scale) {
-  const key = makeKey("tower", tower.uid);
-  const start = drag.startPositions.get(key);
-  if (!start) return { x: tower.x, y: tower.y };
-  return { x: start.x + dx * scale, y: start.y + dy * scale };
 }
 
 function getMovedTowerTargets(drag, dx, dy) {
@@ -2171,7 +2078,6 @@ function applyRotate(world) {
 
   const movedTowerTargets = getTowerTargetsFromPositionMap(nextPositions);
   if (movedTowerTargets.size > 0) {
-    if (!invalidReason && hasMovedWallLengthConflict(movedTowerTargets)) invalidReason = `Wall span exceeds ${GAME.WALL_MAX_LENGTH}.`;
     if (!invalidReason && hasTowerOverlapConflict(movedTowerTargets)) invalidReason = "A tower overlaps another tower.";
     if (!invalidReason && hasTowerOnWallConflict(movedTowerTargets)) invalidReason = "A tower overlaps an existing wall.";
     if (!invalidReason && findWallOverlap(movedTowerTargets)) invalidReason = "Walls overlap or intersect.";
@@ -2389,10 +2295,6 @@ function placeTower(world) {
       return;
     }
     const length = distance(startTower.x, startTower.y, targetTower.x, targetTower.y);
-    if (length > GAME.WALL_MAX_LENGTH) {
-      setActionState(`Wall too long (${Math.round(length)}), max ${GAME.WALL_MAX_LENGTH}`, "error", true);
-      return;
-    }
     if (findWallOverlapForSegment({ x: startTower.x, y: startTower.y }, { x: targetTower.x, y: targetTower.y }, startTower.id, targetTower.id)) {
       setActionState("Walls cannot overlap or intersect.", "error", true);
       return;
@@ -2422,15 +2324,6 @@ function placeTower(world) {
     let x = roundTo(buildTarget.x, 3);
     let y = roundTo(buildTarget.y, 3);
     const teamId = startTower ? startTower.team_id : defaults.defaultTeam;
-    if (startTower) {
-      const dx = x - startTower.x;
-      const dy = y - startTower.y;
-      const dist = Math.hypot(dx, dy);
-      if (dist > GAME.WALL_MAX_LENGTH) {
-        setActionState(`Wall too long (${Math.round(dist)}), max ${GAME.WALL_MAX_LENGTH}`, "error", true);
-        return false;
-      }
-    }
     if (!isPlacementInsideBoundary("tower", x, y)) {
       setActionState("Cannot place tower outside map boundary.", "warn", true);
       return false;
@@ -2461,10 +2354,7 @@ function placeTower(world) {
     };
     state.towers.push(tower);
     if (startTower && !hasDuplicateWall(startTower.id, tower.id)) {
-      const length = distance(startTower.x, startTower.y, tower.x, tower.y);
-      if (length <= GAME.WALL_MAX_LENGTH + 0.0001) {
-        state.walls.push({ uid: createUid("wall"), id: nextWallLocalId(), t1: startTower.id, t2: tower.id, team_id: startTower.team_id });
-      }
+      state.walls.push({ uid: createUid("wall"), id: nextWallLocalId(), t1: startTower.id, t2: tower.id, team_id: startTower.team_id });
     }
     interaction.towerDraftWarnActive = false;
     selection.clear();
@@ -2518,10 +2408,6 @@ function handleWallToolClick(world) {
     return;
   }
   const length = distance(a.x, a.y, b.x, b.y);
-  if (length > GAME.WALL_MAX_LENGTH) {
-    setActionState(`Wall too long (${Math.round(length)}), max ${GAME.WALL_MAX_LENGTH}`, "error", true);
-    return;
-  }
   if (findWallOverlapForSegment({ x: a.x, y: a.y }, { x: b.x, y: b.y }, a.id, b.id)) {
     setActionState("Walls cannot overlap or intersect.", "error", true);
     return;
@@ -2721,7 +2607,6 @@ function validatePasteDraft(draft) {
     const b = towerByOriginalId.get(wall.t2);
     if (!a || !b) return { valid: false, reason: "Copied wall is missing a copied tower." };
     if (a.team_id !== b.team_id || wall.team_id !== a.team_id) return { valid: false, reason: "Copied wall team does not match towers." };
-    if (distance(a.x, a.y, b.x, b.y) > GAME.WALL_MAX_LENGTH + 0.0001) return { valid: false, reason: "Copied wall would be too long." };
     if (findWallOverlapForSegment({ x: a.x, y: a.y }, { x: b.x, y: b.y }, null, null)) return { valid: false, reason: "Copied wall would overlap an existing wall." };
     if (state.towers.some((tower) => pointToSegmentDistance(tower, a, b) <= (GAME.TOWER_DIAMETER / 2) - 0.001)) {
       return { valid: false, reason: "Copied wall would overlap an existing tower." };
@@ -3480,9 +3365,6 @@ function getMapValidationReport(mapState = state) {
     if (towerA.team_id !== towerB.team_id || wall.team_id !== towerA.team_id) {
       addIssue(`Wall ${wall.t1}-${wall.t2} and its towers do not share the same team.`, connectedKeys);
     }
-    if (distance(towerA.x, towerA.y, towerB.x, towerB.y) > GAME.WALL_MAX_LENGTH + 0.0001) {
-      addIssue(`Wall ${wall.t1}-${wall.t2} exceeds the maximum length.`, connectedKeys);
-    }
     const pairKey = `${Math.min(wall.t1, wall.t2)}:${Math.max(wall.t1, wall.t2)}`;
     const matchingWalls = wallPairs.get(pairKey) || [];
     matchingWalls.push(wall);
@@ -3863,17 +3745,12 @@ function drawTowerChainGhostWall() {
   const rawTarget = hoveredTower && hoveredTower.id !== startTower.id
     ? { x: hoveredTower.x, y: hoveredTower.y }
     : snappedTarget;
-  const length = distance(startTower.x, startTower.y, rawTarget.x, rawTarget.y);
-  const ratio = length / GAME.WALL_MAX_LENGTH;
   const outsideBoundary = hoveredTower ? false : !isPlacementInsideBoundary("tower", rawTarget.x, rawTarget.y);
   let color = getTeamColor(startTower.team_id);
-  if (ratio > 0.95) color = COLORS.warn;
-  if (ratio > 1) color = COLORS.danger;
   if (outsideBoundary) color = COLORS.danger;
-  const endWorld = clipLineToMaxLength(startTower.x, startTower.y, rawTarget.x, rawTarget.y, GAME.WALL_MAX_LENGTH);
 
   const start = worldToScreen(startTower.x, startTower.y);
-  const end = worldToScreen(endWorld.x, endWorld.y);
+  const end = worldToScreen(rawTarget.x, rawTarget.y);
 
   ctx.lineCap = "round";
   ctx.lineWidth = 32 * view.scale;
@@ -4192,14 +4069,9 @@ function drawWallDraft() {
   const rawTarget = hoverTower && hoverTower.id !== startTower.id
     ? { x: hoverTower.x, y: hoverTower.y }
     : draft.mouse;
-  const endWorld = clipLineToMaxLength(startTower.x, startTower.y, rawTarget.x, rawTarget.y, GAME.WALL_MAX_LENGTH);
-  const length = distance(startTower.x, startTower.y, rawTarget.x, rawTarget.y);
   const start = worldToScreen(startTower.x, startTower.y);
-  const end = worldToScreen(endWorld.x, endWorld.y);
-  const ratio = length / GAME.WALL_MAX_LENGTH;
-  let color = getTeamColor(startTower.team_id);
-  if (ratio > 0.95) color = COLORS.warn;
-  if (ratio > 1) color = COLORS.danger;
+  const end = worldToScreen(rawTarget.x, rawTarget.y);
+  const color = getTeamColor(startTower.team_id);
   const width = 32 * view.scale;
   ctx.lineCap = "round";
   ctx.lineWidth = width;
@@ -4906,16 +4778,6 @@ function hasTowerOverlapConflict(overrides = null, mapState = state) {
   return false;
 }
 
-function hasMovedWallLengthConflict(overrides = null, mapState = state) {
-  for (const wall of mapState.walls) {
-    const a = getTowerPoint(wall.t1, overrides, mapState);
-    const b = getTowerPoint(wall.t2, overrides, mapState);
-    if (!a || !b) continue;
-    if (distance(a.x, a.y, b.x, b.y) > GAME.WALL_MAX_LENGTH + 0.0001) return true;
-  }
-  return false;
-}
-
 function isTowerPositionOnWall(x, y, ignoreTowerId = null, overrides = null, mapState = state) {
   const clearance = (GAME.TOWER_DIAMETER / 2) - 0.001;
   for (const wall of mapState.walls) {
@@ -4933,6 +4795,67 @@ function hasTowerOnWallConflict(overrides = null, mapState = state) {
     const p = getTowerPoint(tower.id, overrides, mapState);
     if (!p) continue;
     if (isTowerPositionOnWall(p.x, p.y, tower.id, overrides, mapState)) return true;
+  }
+  return false;
+}
+
+function getTowerOverlapSignatures(overrides = null, mapState = state) {
+  const conflicts = new Set();
+  for (let i = 0; i < mapState.towers.length; i += 1) {
+    const towerA = mapState.towers[i];
+    const pointA = getTowerPoint(towerA.id, overrides, mapState);
+    if (!pointA) continue;
+    for (let j = i + 1; j < mapState.towers.length; j += 1) {
+      const towerB = mapState.towers[j];
+      const pointB = getTowerPoint(towerB.id, overrides, mapState);
+      if (!pointB || distance(pointA.x, pointA.y, pointB.x, pointB.y) >= GAME.TOWER_DIAMETER - 0.001) continue;
+      conflicts.add([String(towerA.uid || towerA.id), String(towerB.uid || towerB.id)].sort().join("|"));
+    }
+  }
+  return conflicts;
+}
+
+function getTowerWallConflictSignatures(overrides = null, mapState = state) {
+  const conflicts = new Set();
+  const clearance = (GAME.TOWER_DIAMETER / 2) - 0.001;
+  mapState.towers.forEach((tower) => {
+    const point = getTowerPoint(tower.id, overrides, mapState);
+    if (!point) return;
+    mapState.walls.forEach((wall, wallIndex) => {
+      if (wall.t1 === tower.id || wall.t2 === tower.id) return;
+      const a = getTowerPoint(wall.t1, overrides, mapState);
+      const b = getTowerPoint(wall.t2, overrides, mapState);
+      if (!a || !b || pointToSegmentDistance(point, a, b) > clearance) return;
+      const wallIdentity = wall.uid || wall.id || wallIndex;
+      conflicts.add(`${tower.uid || tower.id}|${wallIdentity}`);
+    });
+  });
+  return conflicts;
+}
+
+function getWallOverlapSignatures(overrides = null, mapState = state) {
+  const conflicts = new Set();
+  for (let i = 0; i < mapState.walls.length; i += 1) {
+    const wallA = mapState.walls[i];
+    const a1 = getTowerPoint(wallA.t1, overrides, mapState);
+    const a2 = getTowerPoint(wallA.t2, overrides, mapState);
+    if (!a1 || !a2) continue;
+    for (let j = i + 1; j < mapState.walls.length; j += 1) {
+      const wallB = mapState.walls[j];
+      const b1 = getTowerPoint(wallB.t1, overrides, mapState);
+      const b2 = getTowerPoint(wallB.t2, overrides, mapState);
+      if (!b1 || !b2 || !wallsConflict(a1, a2, wallA.t1, wallA.t2, b1, b2, wallB.t1, wallB.t2)) continue;
+      const wallAIdentity = String(wallA.uid || wallA.id || i);
+      const wallBIdentity = String(wallB.uid || wallB.id || j);
+      conflicts.add([wallAIdentity, wallBIdentity].sort().join("|"));
+    }
+  }
+  return conflicts;
+}
+
+function hasNewConflict(nextConflicts, initialConflicts) {
+  for (const conflict of nextConflicts) {
+    if (!initialConflicts?.has(conflict)) return true;
   }
   return false;
 }
@@ -5024,18 +4947,6 @@ function onSegment(a, b, c) {
 
 function nearlyEqualPoint(a, b) {
   return Math.abs(a.x - b.x) <= 0.0001 && Math.abs(a.y - b.y) <= 0.0001;
-}
-
-function clipLineToMaxLength(ax, ay, bx, by, maxLength) {
-  const dx = bx - ax;
-  const dy = by - ay;
-  const dist = Math.hypot(dx, dy);
-  if (dist <= maxLength || dist === 0) return { x: bx, y: by };
-  const ratio = maxLength / dist;
-  return {
-    x: ax + dx * ratio,
-    y: ay + dy * ratio,
-  };
 }
 
 function createInitialState() {
