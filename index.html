@@ -42,13 +42,15 @@
 
         <label class="field">
           <span>Tower health</span>
-          <input type="number" id="towerHealthInput" value="5" step="1">
+          <input type="number" id="towerHealthInput" value="4" min="1" max="4" step="1">
         </label>
 
         <label class="checkbox-field">
           <input type="checkbox" id="towerInvincibleInput">
           <span>Tower is_invincible</span>
         </label>
+
+        <button id="makeAllTowersInvincibleBtn" class="action-button secondary" type="button">Make All Towers Invincible</button>
 
         <div id="actionState" class="action-state idle">Idle</div>
       </section>
@@ -59,6 +61,7 @@
     <main class="workspace">
       <canvas id="mapCanvas" aria-label="Map editing canvas"></canvas>
       <div class="workspace-overlay">Scroll to zoom | Right/Middle drag to pan</div>
+      <div id="cursorCoordinates" class="cursor-coordinates hidden" aria-live="polite"></div>
       <section id="settingsPanel" class="panel settings-panel hidden">
         <div class="settings-panel-header">
           <h2>Settings</h2>
@@ -111,6 +114,7 @@
           <li>Use Build to place towers and auto-connect walls.</li>
           <li>In Build, right click or press Esc to unlink the selected tower.</li>
           <li>Right click or middle click and drag to pan.</li>
+          <li>Use WASD or the arrow keys to move around the map.</li>
           <li>Shift/Ctrl/Cmd + click to multi-select in Select / Move.</li>
           <li>Hold Ctrl to temporarily disable object snapping.</li>
           <li>Ctrl+C copies selection; left click places the ghost copy.</li>

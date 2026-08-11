@@ -4,11 +4,13 @@ const ctx = canvas.getContext("2d");
 
 const GAME = {
   SNAP_THRESHOLD: 20,
-  ROTATION_SNAP_DEGREES: 90,
+  ROTATION_SNAP_DEGREES: 45,
   ROTATION_SNAP_THRESHOLD_DEGREES: 5,
   WALL_MAX_LENGTH: 1800,
   WALL_THICKNESS: 32,
-  TOWER_DIAMETER: 88,
+  TOWER_DIAMETER: 70.4,
+  TOWER_MAX_HEALTH: 4,
+  KEYBOARD_PAN_SPEED: 700,
   SPAWN_SIZE: 100,
   BOMB_DIAMETER: 500,
   MIN_ZOOM: 0.08,
@@ -19,7 +21,7 @@ const COLORS = {
   bg: "#0D0F17",
   terrain: "#0D0F17",
   gridMinor: "#2E3842",
-  gridMajor: "#2E3842",
+  gridMajor: "#526679",
   boundary: "#2E3842",
   boundaryFog: "rgba(2, 6, 14, 0.62)",
   blue: "#3D5DFF",
@@ -65,6 +67,8 @@ const el = {
   multiplayerToastStack: document.getElementById("multiplayerToastStack"),
   towerHealthInput: document.getElementById("towerHealthInput"),
   towerInvincibleInput: document.getElementById("towerInvincibleInput"),
+  makeAllTowersInvincibleBtn: document.getElementById("makeAllTowersInvincibleBtn"),
+  cursorCoordinates: document.getElementById("cursorCoordinates"),
   actionState: document.getElementById("actionState"),
   exportBtn: document.getElementById("exportBtn"),
   importBtn: document.getElementById("importBtn"),
@@ -81,6 +85,9 @@ let invalidObjectWarningCount = 0;
 let editorClipboard = null;
 let multiplayerManager = null;
 let panelResize = null;
+let activeValidationReport = null;
+const keyboardPanKeys = new Set();
+let lastFrameTime = null;
 
 let state = createInitialState();
 const selection = new Set();
@@ -88,7 +95,7 @@ const history = { undo: [], redo: [], limit: 220 };
 
 const defaults = {
   defaultTeam: 0,
-  towerHealth: 5,
+  towerHealth: GAME.TOWER_MAX_HEALTH,
   towerInvincible: false,
 };
 
@@ -1079,7 +1086,7 @@ class ActionValidator {
         team_id: Number(item.team_id),
         x: Number(item.x),
         y: Number(item.y),
-        health: clamp(1, Math.round(Number(item.health) || 5), 5),
+        health: clamp(1, Math.round(Number(item.health) || GAME.TOWER_MAX_HEALTH), GAME.TOWER_MAX_HEALTH),
         is_invincible: Boolean(item.is_invincible),
       });
     });
@@ -1121,7 +1128,7 @@ class ActionValidator {
         team_id: Number(item.team_id),
         x: Number(item.x),
         y: Number(item.y),
-        health: clamp(1, Math.round(Number(item.health) || current.health || 5), 5),
+        health: clamp(1, Math.round(Number(item.health) || current.health || GAME.TOWER_MAX_HEALTH), GAME.TOWER_MAX_HEALTH),
         is_invincible: Boolean(item.is_invincible),
       };
     }
@@ -1259,24 +1266,52 @@ function setup() {
   updateTeamSwatches();
   el.snapStrengthInput.value = String(editorSettings.snapStrength);
   el.buildSnapEnabledInput.checked = editorSettings.buildModeSnapEnabled;
-  el.towerHealthInput.max = "5";
+  el.towerHealthInput.max = String(GAME.TOWER_MAX_HEALTH);
   el.towerHealthInput.value = String(defaults.towerHealth);
   el.towerInvincibleInput.checked = defaults.towerInvincible;
   resizeCanvas();
   setMode("select");
   renderSelectionPanel();
-  setActionState("Idle", "idle");
+  if (!updateInvalidObjectWarning()) setActionState("Idle", "idle");
   requestRender();
   window.addEventListener("resize", onWindowResize);
   requestAnimationFrame(frame);
 }
 
-function frame() {
+function frame(timestamp) {
+  updateKeyboardPan(timestamp);
   if (needsRender) {
     draw();
     needsRender = false;
   }
   requestAnimationFrame(frame);
+}
+
+function updateKeyboardPan(timestamp) {
+  if (lastFrameTime == null) {
+    lastFrameTime = timestamp;
+    return;
+  }
+  const elapsedSeconds = Math.min(0.05, Math.max(0, timestamp - lastFrameTime) / 1000);
+  lastFrameTime = timestamp;
+  if (!keyboardPanKeys.size || elapsedSeconds === 0) return;
+
+  let x = 0;
+  let y = 0;
+  if (keyboardPanKeys.has("a") || keyboardPanKeys.has("arrowleft")) x += 1;
+  if (keyboardPanKeys.has("d") || keyboardPanKeys.has("arrowright")) x -= 1;
+  if (keyboardPanKeys.has("w") || keyboardPanKeys.has("arrowup")) y += 1;
+  if (keyboardPanKeys.has("s") || keyboardPanKeys.has("arrowdown")) y -= 1;
+  if (x === 0 && y === 0) return;
+
+  const magnitude = Math.hypot(x, y) || 1;
+  const movement = GAME.KEYBOARD_PAN_SPEED * elapsedSeconds;
+  view.offsetX += (x / magnitude) * movement;
+  view.offsetY += (y / magnitude) * movement;
+  interaction.mouseWorld = screenToWorld(interaction.mouseScreen.x, interaction.mouseScreen.y);
+  updateCursorCoordinates();
+  if (interaction.mode === "build" || interaction.mode === "boundary") refreshPlacementPreviewFromMouse();
+  requestRender();
 }
 
 function requestRender() {
@@ -1396,7 +1431,7 @@ function bindUI() {
   el.towerHealthInput.addEventListener("change", () => {
     const v = Math.round(Number(el.towerHealthInput.value));
     if (Number.isFinite(v)) {
-      defaults.towerHealth = clamp(1, v, 5);
+      defaults.towerHealth = clamp(1, v, GAME.TOWER_MAX_HEALTH);
       el.towerHealthInput.value = String(defaults.towerHealth);
       saveSession();
     }
@@ -1404,6 +1439,23 @@ function bindUI() {
   el.towerInvincibleInput.addEventListener("change", () => {
     defaults.towerInvincible = el.towerInvincibleInput.checked;
     saveSession();
+  });
+  el.makeAllTowersInvincibleBtn?.addEventListener("click", () => {
+    if (!state.towers.length) {
+      setActionState("There are no towers to update", "warn", true);
+      return;
+    }
+    const changed = withAction("MAKE_ALL_TOWERS_INVINCIBLE", () => {
+      let updated = false;
+      state.towers.forEach((tower) => {
+        if (tower.is_invincible) return;
+        tower.is_invincible = true;
+        updated = true;
+      });
+      return updated;
+    });
+    setActionState(changed ? `Made all ${state.towers.length} towers invincible` : "All towers are already invincible", changed ? "success" : "idle", true);
+    renderSelectionPanel();
   });
 
   el.snapStrengthInput.addEventListener("change", () => {
@@ -1439,6 +1491,7 @@ function bindUI() {
   canvas.addEventListener("wheel", onWheel, { passive: false });
   window.addEventListener("keydown", onKeyDown);
   window.addEventListener("keyup", onKeyUp);
+  window.addEventListener("blur", () => keyboardPanKeys.clear());
   document.addEventListener("mousedown", onDocumentMouseDown);
 }
 
@@ -1500,6 +1553,7 @@ function setMode(mode) {
   }
   updateToolButtons();
   updateCursor();
+  updateCursorCoordinates();
   setActionState(`Tool: ${toolLabel(mode)}`, "idle", true);
   requestRender();
 }
@@ -1792,6 +1846,12 @@ function onKeyDown(event) {
     requestRender();
   }
 
+  if (!mod && !event.altKey && !isTypingInFormControl() && isKeyboardPanKey(key)) {
+    event.preventDefault();
+    keyboardPanKeys.add(key);
+    return;
+  }
+
   if (mod && !event.shiftKey && key === "z") {
     event.preventDefault();
     undoAction();
@@ -1835,11 +1895,17 @@ function onKeyDown(event) {
 }
 
 function onKeyUp(event) {
+  keyboardPanKeys.delete(event.key.toLowerCase());
   interaction.snapTemporarilyDisabled = event.ctrlKey;
   if (interaction.mode === "build" || interaction.mode === "boundary") {
     refreshPlacementPreviewFromMouse();
     requestRender();
   }
+}
+
+function isKeyboardPanKey(key) {
+  return key === "w" || key === "a" || key === "s" || key === "d"
+    || key === "arrowup" || key === "arrowleft" || key === "arrowdown" || key === "arrowright";
 }
 
 function isTypingInFormControl() {
@@ -1859,6 +1925,15 @@ function updateMousePosition(event) {
   interaction.mouseScreen.y = event.clientY - rect.top;
   interaction.mouseWorld = screenToWorld(interaction.mouseScreen.x, interaction.mouseScreen.y);
   interaction.snapTemporarilyDisabled = Boolean(event.ctrlKey);
+  updateCursorCoordinates();
+}
+
+function updateCursorCoordinates() {
+  if (!el.cursorCoordinates) return;
+  const x = roundTo(interaction.mouseWorld.x, 1);
+  const y = roundTo(interaction.mouseWorld.y, 1);
+  el.cursorCoordinates.textContent = `X ${x}  Y ${y}`;
+  el.cursorCoordinates.classList.toggle("hidden", interaction.mode !== "build");
 }
 
 function screenToWorld(screenX, screenY) {
@@ -2381,7 +2456,7 @@ function placeTower(world) {
       team_id: teamId,
       x,
       y,
-      health: clamp(1, Math.round(defaults.towerHealth), 5),
+      health: clamp(1, Math.round(defaults.towerHealth), GAME.TOWER_MAX_HEALTH),
       is_invincible: defaults.towerInvincible,
     };
     state.towers.push(tower);
@@ -2696,7 +2771,7 @@ function commitPasteDraft() {
         team_id: tower.team_id,
         x: tower.x,
         y: tower.y,
-        health: clamp(1, Math.round(tower.health), 5),
+        health: clamp(1, Math.round(tower.health), GAME.TOWER_MAX_HEALTH),
         is_invincible: Boolean(tower.is_invincible),
       };
       towerIdMap.set(tower.id, pasted.id);
@@ -2875,7 +2950,7 @@ function renderSelectionPanel() {
 }
 
 function renderMultiSelection(entries) {
-  const allTowers = entries.every((entry) => entry.type === "tower");
+  const towerEntries = entries.filter((entry) => entry.type === "tower");
   const teamEditable = entries.filter((entry) => ["tower", "spawn", "wall", "structure"].includes(entry.type));
   el.selectionPanel.innerHTML = `
     ${selectionTypeRow("Multi Selection")}
@@ -2888,15 +2963,16 @@ function renderMultiSelection(entries) {
       ${teamSwatchMarkup(0, true)}
       <button id="applyMultiTeam" class="action-button">Apply Team</button>
     ` : ""}
-    ${allTowers ? `
+    ${towerEntries.length ? `
       <label class="field">
-        <span>Set health for selected towers</span>
-        <input id="multiTowerHealth" type="number" step="1" min="1" max="5" value="5">
+        <span>Set health for ${towerEntries.length} selected tower${towerEntries.length === 1 ? "" : "s"}</span>
+        <input id="multiTowerHealth" type="number" step="1" min="1" max="${GAME.TOWER_MAX_HEALTH}" value="${GAME.TOWER_MAX_HEALTH}">
       </label>
       <label class="checkbox-field">
         <input id="multiTowerInvincible" type="checkbox">
-        <span>Set is_invincible = true</span>
+        <span>Set selected towers invincible</span>
       </label>
+      ${towerEntries.length !== entries.length ? `<p class="muted" style="margin-bottom:8px;">Non-tower objects in this selection are left unchanged.</p>` : ""}
       <button id="applyMultiTowerProps" class="action-button secondary">Apply Tower Properties</button>
     ` : ""}
     ${snapToggleMarkup()}
@@ -2931,11 +3007,11 @@ function renderMultiSelection(entries) {
   const applyTower = document.getElementById("applyMultiTowerProps");
   if (applyTower) {
     applyTower.addEventListener("click", () => {
-      const health = clamp(1, Math.round(Number(document.getElementById("multiTowerHealth").value)), 5);
+      const health = clamp(1, Math.round(Number(document.getElementById("multiTowerHealth").value)), GAME.TOWER_MAX_HEALTH);
       const inv = document.getElementById("multiTowerInvincible").checked;
       withAction("MASS_TOWER_EDIT", () => {
         let changed = false;
-        entries.forEach((entry) => {
+        towerEntries.forEach((entry) => {
           if (entry.type === "tower" && (entry.item.health !== health || entry.item.is_invincible !== inv)) {
             entry.item.health = health;
             entry.item.is_invincible = inv;
@@ -2959,7 +3035,7 @@ function renderTowerSelection(entry) {
     ${teamSwatchMarkup(tower.team_id, true)}
     <label class="field"><span>x</span><input id="selTowerX" type="number" step="0.1" value="${tower.x}"></label>
     <label class="field"><span>y</span><input id="selTowerY" type="number" step="0.1" value="${tower.y}"></label>
-    <label class="field"><span>health</span><input id="selTowerHealth" type="number" step="1" max="5" min="1" value="${tower.health}"></label>
+    <label class="field"><span>health</span><input id="selTowerHealth" type="number" step="1" max="${GAME.TOWER_MAX_HEALTH}" min="1" value="${tower.health}"></label>
     <label class="checkbox-field"><input id="selTowerInv" type="checkbox" ${tower.is_invincible ? "checked" : ""}><span>is_invincible</span></label>
     ${snapToggleMarkup()}
     <button id="deleteTowerBtn" class="danger-button">Delete Tower</button>
@@ -2967,7 +3043,7 @@ function renderTowerSelection(entry) {
   bindTeamSwatchGroup(el.selectionPanel, tower.team_id, (nextTeam) => withAction("EDIT_TOWER", () => setConnectedComponentTeam(tower.id, nextTeam)));
   bindNumericChange("selTowerX", (v) => withAction("MOVE_TOWER", () => { tower.x = roundTo(v, 3); return true; }));
   bindNumericChange("selTowerY", (v) => withAction("MOVE_TOWER", () => { tower.y = roundTo(v, 3); return true; }));
-  bindNumericChange("selTowerHealth", (v) => withAction("EDIT_TOWER", () => { tower.health = clamp(1, Math.round(v), 5); return true; }));
+  bindNumericChange("selTowerHealth", (v) => withAction("EDIT_TOWER", () => { tower.health = clamp(1, Math.round(v), GAME.TOWER_MAX_HEALTH); return true; }));
   document.getElementById("selTowerInv").addEventListener("change", (e) => withAction("EDIT_TOWER", () => { tower.is_invincible = e.target.checked; return true; }));
   bindSnapToggle();
   document.getElementById("deleteTowerBtn").addEventListener("click", deleteSelected);
@@ -3212,6 +3288,7 @@ function onStateChanged() {
 }
 
 function onStateReplaced() {
+  normalizeTowerHealthInState();
   interaction.wallDraft = null;
   interaction.hoverTowerId = null;
   interaction.buildGhost = null;
@@ -3239,6 +3316,7 @@ function restoreSavedSession() {
     const saved = JSON.parse(raw);
     if (!isSessionStateShape(saved?.state)) return;
     state = saved.state;
+    normalizeTowerHealthInState();
     if (Array.isArray(saved?.history?.undo)) history.undo = saved.history.undo.filter(isLocalHistoryEntry).slice(-history.limit);
     if (Array.isArray(saved?.history?.redo)) history.redo = saved.history.redo.filter(isLocalHistoryEntry).slice(-history.limit);
     if (Number.isFinite(saved?.editorSettings?.snapStrength)) {
@@ -3251,7 +3329,7 @@ function restoreSavedSession() {
       defaults.defaultTeam = saved.defaults.defaultTeam;
     }
     if (Number.isFinite(saved?.defaults?.towerHealth)) {
-      defaults.towerHealth = clamp(1, Math.round(saved.defaults.towerHealth), 5);
+      defaults.towerHealth = clamp(1, Math.round(saved.defaults.towerHealth), GAME.TOWER_MAX_HEALTH);
     }
     if (typeof saved?.defaults?.towerInvincible === "boolean") {
       defaults.towerInvincible = saved.defaults.towerInvincible;
@@ -3259,6 +3337,12 @@ function restoreSavedSession() {
   } catch (error) {
     console.warn("Could not restore saved map editor session.", error);
   }
+}
+
+function normalizeTowerHealthInState() {
+  state.towers.forEach((tower) => {
+    tower.health = clamp(1, Math.round(Number(tower.health) || GAME.TOWER_MAX_HEALTH), GAME.TOWER_MAX_HEALTH);
+  });
 }
 
 function saveSession() {
@@ -3295,24 +3379,146 @@ function sanitizeSelection() {
 }
 
 function getInvalidObjects(mapState = state) {
+  const report = getMapValidationReport(mapState);
   const invalid = [];
-  mapState.towers.forEach((item) => {
-    if (isObjectInvalid("tower", item, mapState)) invalid.push({ type: "tower", item, key: makeKey("tower", item.uid) });
-  });
-  mapState.spawn_points.forEach((item) => {
-    if (isObjectInvalid("spawn", item, mapState)) invalid.push({ type: "spawn", item, key: makeKey("spawn", item.uid) });
-  });
-  mapState.bomb_sites.forEach((item) => {
-    if (isObjectInvalid("bomb", item, mapState)) invalid.push({ type: "bomb", item, key: makeKey("bomb", item.uid) });
-  });
-  mapState.structures.forEach((item) => {
-    if (isObjectInvalid("structure", item, mapState)) invalid.push({ type: "structure", item, key: makeKey("structure", item.uid) });
-  });
+  const addInvalid = (type, items) => {
+    items.forEach((item) => {
+      const key = makeKey(type, item.uid);
+      if (report.invalidKeys.has(key)) invalid.push({ type, item, key });
+    });
+  };
+  addInvalid("boundary", mapState.map_boundaries);
+  addInvalid("spawn", mapState.spawn_points);
+  addInvalid("bomb", mapState.bomb_sites);
+  addInvalid("tower", mapState.towers);
+  addInvalid("wall", mapState.walls);
+  addInvalid("structure", mapState.structures);
   return invalid;
 }
 
 function isObjectInvalid(type, item, mapState = state) {
+  const report = mapState === state && activeValidationReport
+    ? activeValidationReport
+    : getMapValidationReport(mapState);
+  return report.invalidKeys.has(makeKey(type, item.uid));
+}
+
+function isObjectOutsideBoundary(type, item, mapState = state) {
   return !isPlacementInsideBoundary(type, item.x, item.y, item, mapState);
+}
+
+function getMapValidationReport(mapState = state) {
+  const issues = [];
+  const invalidKeys = new Set();
+  const addIssue = (message, keys = []) => {
+    keys.filter(Boolean).forEach((key) => invalidKeys.add(key));
+    issues.push({ message, keys: keys.filter(Boolean) });
+  };
+  const keyFor = (type, item) => item?.uid ? makeKey(type, item.uid) : null;
+
+  if (mapState.map_boundaries.length < 3) {
+    addIssue(
+      "Map boundary must contain at least 3 points.",
+      mapState.map_boundaries.map((item) => keyFor("boundary", item)),
+    );
+  }
+
+  const placementCollections = [
+    ["tower", "Tower", mapState.towers],
+    ["spawn", "Spawn", mapState.spawn_points],
+    ["bomb", "Bomb site", mapState.bomb_sites],
+    ["structure", "Structure", mapState.structures],
+  ];
+  placementCollections.forEach(([type, label, items]) => {
+    items.forEach((item) => {
+      if (!isObjectOutsideBoundary(type, item, mapState)) return;
+      const identity = type === "tower" ? ` ${item.id}` : "";
+      addIssue(`${label}${identity} is outside the map boundary.`, [keyFor(type, item)]);
+    });
+  });
+
+  const team0Spawns = mapState.spawn_points.filter((item) => item.team_id === 0);
+  const team1Spawns = mapState.spawn_points.filter((item) => item.team_id === 1);
+  if (mapState.spawn_points.length !== 2 || team0Spawns.length !== 1 || team1Spawns.length !== 1) {
+    addIssue(
+      "Spawn points must include exactly one Team 0 spawn and one Team 1 spawn.",
+      mapState.spawn_points.map((item) => keyFor("spawn", item)),
+    );
+  }
+
+  const towersById = new Map();
+  mapState.towers.forEach((tower) => {
+    const matches = towersById.get(tower.id) || [];
+    matches.push(tower);
+    towersById.set(tower.id, matches);
+  });
+  towersById.forEach((matches, id) => {
+    if (matches.length < 2) return;
+    addIssue(`Tower id ${id} is duplicated.`, matches.map((item) => keyFor("tower", item)));
+  });
+
+  for (let i = 0; i < mapState.towers.length; i += 1) {
+    const towerA = mapState.towers[i];
+    for (let j = i + 1; j < mapState.towers.length; j += 1) {
+      const towerB = mapState.towers[j];
+      if (distance(towerA.x, towerA.y, towerB.x, towerB.y) >= GAME.TOWER_DIAMETER - 0.001) continue;
+      addIssue(`Towers ${towerA.id} and ${towerB.id} overlap.`, [keyFor("tower", towerA), keyFor("tower", towerB)]);
+    }
+  }
+
+  const wallPairs = new Map();
+  mapState.walls.forEach((wall) => {
+    const wallKey = keyFor("wall", wall);
+    const towerA = getTowerByIdFrom(mapState, wall.t1);
+    const towerB = getTowerByIdFrom(mapState, wall.t2);
+    const connectedKeys = [wallKey, keyFor("tower", towerA), keyFor("tower", towerB)];
+    if (wall.t1 === wall.t2) addIssue(`A wall connects tower ${wall.t1} to itself.`, connectedKeys);
+    if (!towerA || !towerB) {
+      addIssue(`A wall references missing tower ${!towerA ? wall.t1 : wall.t2}.`, connectedKeys);
+      return;
+    }
+    if (towerA.team_id !== towerB.team_id || wall.team_id !== towerA.team_id) {
+      addIssue(`Wall ${wall.t1}-${wall.t2} and its towers do not share the same team.`, connectedKeys);
+    }
+    if (distance(towerA.x, towerA.y, towerB.x, towerB.y) > GAME.WALL_MAX_LENGTH + 0.0001) {
+      addIssue(`Wall ${wall.t1}-${wall.t2} exceeds the maximum length.`, connectedKeys);
+    }
+    const pairKey = `${Math.min(wall.t1, wall.t2)}:${Math.max(wall.t1, wall.t2)}`;
+    const matchingWalls = wallPairs.get(pairKey) || [];
+    matchingWalls.push(wall);
+    wallPairs.set(pairKey, matchingWalls);
+  });
+  wallPairs.forEach((matches, pairKey) => {
+    if (matches.length < 2) return;
+    addIssue(`Duplicate walls connect towers ${pairKey.replace(":", " and ")}.`, matches.map((item) => keyFor("wall", item)));
+  });
+
+  for (let i = 0; i < mapState.walls.length; i += 1) {
+    const wallA = mapState.walls[i];
+    const a1 = getTowerByIdFrom(mapState, wallA.t1);
+    const a2 = getTowerByIdFrom(mapState, wallA.t2);
+    if (!a1 || !a2) continue;
+    for (let j = i + 1; j < mapState.walls.length; j += 1) {
+      const wallB = mapState.walls[j];
+      const b1 = getTowerByIdFrom(mapState, wallB.t1);
+      const b2 = getTowerByIdFrom(mapState, wallB.t2);
+      if (!b1 || !b2 || !wallsConflict(a1, a2, wallA.t1, wallA.t2, b1, b2, wallB.t1, wallB.t2)) continue;
+      addIssue(`Walls ${wallA.t1}-${wallA.t2} and ${wallB.t1}-${wallB.t2} overlap or intersect.`, [keyFor("wall", wallA), keyFor("wall", wallB)]);
+    }
+  }
+
+  mapState.towers.forEach((tower) => {
+    mapState.walls.forEach((wall) => {
+      if (wall.t1 === tower.id || wall.t2 === tower.id) return;
+      const towerA = getTowerByIdFrom(mapState, wall.t1);
+      const towerB = getTowerByIdFrom(mapState, wall.t2);
+      if (!towerA || !towerB) return;
+      if (pointToSegmentDistance(tower, towerA, towerB) > (GAME.TOWER_DIAMETER / 2) - 0.001) return;
+      addIssue(`Tower ${tower.id} overlaps wall ${wall.t1}-${wall.t2}.`, [keyFor("tower", tower), keyFor("wall", wall)]);
+    });
+  });
+
+  return { issues, invalidKeys };
 }
 
 function isActiveRotationInvalidKey(key) {
@@ -3330,21 +3536,25 @@ function isActiveRotationInvalidWall(wall) {
 }
 
 function updateInvalidObjectWarning() {
-  const count = getInvalidObjects().length;
+  const report = getMapValidationReport();
+  const count = report.invalidKeys.size;
   const previousCount = invalidObjectWarningCount;
   invalidObjectWarningCount = count;
-  if (count <= 0) {
+  if (report.issues.length <= 0) {
     if (previousCount > 0 && el.actionState.classList.contains("warn")) {
       el.actionState.textContent = "Idle";
       el.actionState.className = "action-state idle";
     }
     return false;
   }
-  setActionState(`${count} object${count === 1 ? "" : "s"} invalid; export will remove invalid objects.`, "warn");
+  const additional = report.issues.length > 1 ? ` (+${report.issues.length - 1} more)` : "";
+  const objectSummary = count > 0 ? `${count} invalid object${count === 1 ? "" : "s"}: ` : "Map invalid: ";
+  setActionState(`${objectSummary}${report.issues[0].message}${additional}`, "warn");
   return true;
 }
 
 function draw() {
+  activeValidationReport = getMapValidationReport();
   ctx.fillStyle = COLORS.bg;
   ctx.fillRect(0, 0, viewport.width, viewport.height);
   drawGrid();
@@ -3363,6 +3573,7 @@ function draw() {
   drawGuides();
   drawWallDraft();
   drawBoxSelection();
+  activeValidationReport = null;
 }
 
 function drawGrid() {
@@ -3371,13 +3582,15 @@ function drawGrid() {
   const top = screenToWorld(0, 0).y;
   const bottom = screenToWorld(0, viewport.height).y;
   const cell = 48;
+  const majorCell = cell * 5;
   const xStart = Math.floor(left / cell) * cell;
   const yStart = Math.floor(top / cell) * cell;
 
   ctx.strokeStyle = COLORS.gridMinor;
-  ctx.lineWidth = 1.5 * view.scale;
+  ctx.lineWidth = 1;
 
   for (let x = xStart; x <= right; x += cell) {
+    if (Math.abs(x % majorCell) < 0.001) continue;
     const sx = worldToScreen(x, 0).x;
     ctx.beginPath();
     ctx.moveTo(sx, 0);
@@ -3386,7 +3599,47 @@ function drawGrid() {
   }
 
   for (let y = yStart; y <= bottom; y += cell) {
+    if (Math.abs(y % majorCell) < 0.001) continue;
     const sy = worldToScreen(0, y).y;
+    ctx.beginPath();
+    ctx.moveTo(0, sy);
+    ctx.lineTo(viewport.width, sy);
+    ctx.stroke();
+  }
+
+  const majorXStart = Math.floor(left / majorCell) * majorCell;
+  const majorYStart = Math.floor(top / majorCell) * majorCell;
+  ctx.strokeStyle = COLORS.gridMajor;
+  ctx.lineWidth = 1.5;
+
+  for (let x = majorXStart; x <= right; x += majorCell) {
+    const sx = worldToScreen(x, 0).x;
+    ctx.beginPath();
+    ctx.moveTo(sx, 0);
+    ctx.lineTo(sx, viewport.height);
+    ctx.stroke();
+  }
+
+  for (let y = majorYStart; y <= bottom; y += majorCell) {
+    const sy = worldToScreen(0, y).y;
+    ctx.beginPath();
+    ctx.moveTo(0, sy);
+    ctx.lineTo(viewport.width, sy);
+    ctx.stroke();
+  }
+
+  // Emphasize the world axes so the map's horizontal and vertical halves are easy to read.
+  ctx.strokeStyle = "#7C95AA";
+  ctx.lineWidth = 2.25;
+  if (left <= 0 && right >= 0) {
+    const sx = worldToScreen(0, 0).x;
+    ctx.beginPath();
+    ctx.moveTo(sx, 0);
+    ctx.lineTo(sx, viewport.height);
+    ctx.stroke();
+  }
+  if (top <= 0 && bottom >= 0) {
+    const sy = worldToScreen(0, 0).y;
     ctx.beginPath();
     ctx.moveTo(0, sy);
     ctx.lineTo(viewport.width, sy);
@@ -3415,7 +3668,8 @@ function drawBoundaryFogMask() {
 
 function drawBoundary() {
   if (!state.map_boundaries.length) return;
-  ctx.strokeStyle = COLORS.boundary;
+  const boundaryInvalid = state.map_boundaries.some((point) => isObjectInvalid("boundary", point));
+  ctx.strokeStyle = boundaryInvalid ? COLORS.danger : COLORS.boundary;
   ctx.lineWidth = 4.0 * view.scale;
   ctx.beginPath();
   state.map_boundaries.forEach((point, i) => {
@@ -3433,9 +3687,10 @@ function drawBoundary() {
   state.map_boundaries.forEach((point) => {
     const p = worldToScreen(point.x, point.y);
     const selected = selection.has(makeKey("boundary", point.uid));
+    const invalid = isObjectInvalid("boundary", point);
     ctx.beginPath();
     ctx.arc(p.x, p.y, selected ? 6 : 4, 0, Math.PI * 2);
-    ctx.fillStyle = selected ? "#FFFFFF" : "#AEBAC8";
+    ctx.fillStyle = invalid ? COLORS.danger : (selected ? "#FFFFFF" : "#AEBAC8");
     ctx.fill();
   });
 }
@@ -3470,7 +3725,7 @@ function drawWalls() {
     if (!aTower || !bTower) return;
     const a = worldToScreen(aTower.x, aTower.y);
     const b = worldToScreen(bTower.x, bTower.y);
-    const invalid = isObjectInvalid("tower", aTower) || isObjectInvalid("tower", bTower) || isActiveRotationInvalidWall(wall);
+    const invalid = isObjectInvalid("wall", wall) || isObjectInvalid("tower", aTower) || isObjectInvalid("tower", bTower) || isActiveRotationInvalidWall(wall);
     const color = invalid ? COLORS.danger : getTeamColor(wall.team_id);
     ctx.lineCap = "round";
     ctx.lineWidth = 32 * view.scale;
@@ -3563,8 +3818,8 @@ function drawTowers() {
     const borderColor = tower.is_invincible ? "#FFD166" : color;
 
     ctx.beginPath();
-    ctx.arc(p.x, p.y, 44 * view.scale, 0, Math.PI * 2);
-    ctx.lineWidth = 8 * view.scale;
+    ctx.arc(p.x, p.y, (GAME.TOWER_DIAMETER / 2) * view.scale, 0, Math.PI * 2);
+    ctx.lineWidth = (GAME.TOWER_DIAMETER / 11) * view.scale;
     ctx.strokeStyle = borderColor;
     ctx.fillStyle = color;
     ctx.fill();
@@ -3572,7 +3827,7 @@ function drawTowers() {
 
     if (invalid) {
       ctx.beginPath();
-      ctx.arc(p.x, p.y, 44 * view.scale, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, (GAME.TOWER_DIAMETER / 2) * view.scale, 0, Math.PI * 2);
       ctx.fillStyle = withAlpha(COLORS.danger, 0.35);
       ctx.fill();
       ctx.lineWidth = 4 * view.scale;
@@ -3582,7 +3837,7 @@ function drawTowers() {
 
     if (!tower.is_invincible) {
       ctx.fillStyle = "#FFFFFF";
-      ctx.font = `${16 * view.scale}px sans-serif`;
+      ctx.font = `${(GAME.TOWER_DIAMETER / 5.5) * view.scale}px sans-serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(String(tower.health), p.x, p.y);
@@ -3590,7 +3845,7 @@ function drawTowers() {
 
     if (selection.has(makeKey("tower", tower.uid))) {
       ctx.beginPath();
-      ctx.arc(p.x, p.y, (44 * view.scale) + (8 * view.scale), 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, ((GAME.TOWER_DIAMETER / 2) + (GAME.TOWER_DIAMETER / 11)) * view.scale, 0, Math.PI * 2);
       ctx.lineWidth = 3 * view.scale;
       ctx.strokeStyle = "#FFFFFF";
       ctx.stroke();
@@ -3645,8 +3900,8 @@ function drawBuildGhostTower() {
 
   ctx.globalAlpha = invalid ? 0.45 : 0.35;
   ctx.beginPath();
-  ctx.arc(p.x, p.y, 44 * view.scale, 0, Math.PI * 2);
-  ctx.lineWidth = 8 * view.scale;
+  ctx.arc(p.x, p.y, (GAME.TOWER_DIAMETER / 2) * view.scale, 0, Math.PI * 2);
+  ctx.lineWidth = (GAME.TOWER_DIAMETER / 11) * view.scale;
   ctx.strokeStyle = borderColor;
   ctx.fillStyle = color;
   ctx.fill();
@@ -3655,10 +3910,10 @@ function drawBuildGhostTower() {
   if (!defaults.towerInvincible) {
     ctx.globalAlpha = 0.9;
     ctx.fillStyle = "#FFFFFF";
-    ctx.font = `${16 * view.scale}px sans-serif`;
+    ctx.font = `${(GAME.TOWER_DIAMETER / 5.5) * view.scale}px sans-serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(String(clamp(1, Math.round(defaults.towerHealth), 5)), p.x, p.y);
+    ctx.fillText(String(clamp(1, Math.round(defaults.towerHealth), GAME.TOWER_MAX_HEALTH)), p.x, p.y);
   }
   ctx.globalAlpha = 1.0;
 }
@@ -3754,8 +4009,8 @@ function drawPasteDraft() {
     const borderColor = tower.is_invincible && !invalid ? "#FFD166" : color;
     ctx.globalAlpha = invalid ? 0.45 : 0.35;
     ctx.beginPath();
-    ctx.arc(p.x, p.y, 44 * view.scale, 0, Math.PI * 2);
-    ctx.lineWidth = 8 * view.scale;
+    ctx.arc(p.x, p.y, (GAME.TOWER_DIAMETER / 2) * view.scale, 0, Math.PI * 2);
+    ctx.lineWidth = (GAME.TOWER_DIAMETER / 11) * view.scale;
     ctx.strokeStyle = borderColor;
     ctx.fillStyle = color;
     ctx.fill();
@@ -3764,7 +4019,7 @@ function drawPasteDraft() {
     if (!tower.is_invincible) {
       ctx.globalAlpha = 0.9;
       ctx.fillStyle = "#FFFFFF";
-      ctx.font = `${16 * view.scale}px sans-serif`;
+      ctx.font = `${(GAME.TOWER_DIAMETER / 5.5) * view.scale}px sans-serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(String(tower.health), p.x, p.y);
@@ -3984,12 +4239,13 @@ function getTotalWallLength() {
 }
 
 function exportJSON() {
-  const invalidRemoved = getInvalidObjects().length;
+  const invalidRemoved = getOutOfBoundsObjects().length;
   const exportState = getExportableState();
   const validation = validateForExport(exportState);
   if (validation) {
     alert(validation);
-    setActionState(validation, "error", true);
+    setActionState(validation, "error");
+    requestRender();
     return;
   }
   const payload = {
@@ -4002,7 +4258,7 @@ function exportJSON() {
       team_id: t.team_id,
       x: roundTo(t.x, 3),
       y: roundTo(t.y, 3),
-      health: clamp(1, Math.round(t.health), 5),
+      health: clamp(1, Math.round(t.health), GAME.TOWER_MAX_HEALTH),
       is_invincible: Boolean(t.is_invincible),
     })),
     walls: exportState.walls.map((w) => ({ t1: w.t1, t2: w.t2, team_id: w.team_id })),
@@ -4023,44 +4279,34 @@ function exportJSON() {
   setActionState(invalidRemoved ? `Export successful; removed ${invalidRemoved} invalid object${invalidRemoved === 1 ? "" : "s"}` : "Export successful", "success", true);
 }
 
+function getOutOfBoundsObjects(mapState = state) {
+  const out = [];
+  const collect = (type, items) => items.forEach((item) => {
+    if (isObjectOutsideBoundary(type, item, mapState)) out.push({ type, item });
+  });
+  collect("tower", mapState.towers);
+  collect("spawn", mapState.spawn_points);
+  collect("bomb", mapState.bomb_sites);
+  collect("structure", mapState.structures);
+  return out;
+}
+
 function getExportableState() {
-  const towers = state.towers.filter((item) => !isObjectInvalid("tower", item));
+  const towers = state.towers.filter((item) => !isObjectOutsideBoundary("tower", item));
   const towerIds = new Set(towers.map((tower) => tower.id));
   return {
     ...state,
-    spawn_points: state.spawn_points.filter((item) => !isObjectInvalid("spawn", item)),
-    bomb_sites: state.bomb_sites.filter((item) => !isObjectInvalid("bomb", item)),
+    spawn_points: state.spawn_points.filter((item) => !isObjectOutsideBoundary("spawn", item)),
+    bomb_sites: state.bomb_sites.filter((item) => !isObjectOutsideBoundary("bomb", item)),
     towers,
     walls: state.walls.filter((wall) => towerIds.has(wall.t1) && towerIds.has(wall.t2)),
-    structures: state.structures.filter((item) => !isObjectInvalid("structure", item)),
+    structures: state.structures.filter((item) => !isObjectOutsideBoundary("structure", item)),
   };
 }
 
 function validateForExport(mapState = state) {
-  if (mapState.map_boundaries.length < 3) return "Validation error: map_boundaries must contain at least 3 points.";
-  const team0 = mapState.spawn_points.filter((p) => p.team_id === 0).length;
-  const team1 = mapState.spawn_points.filter((p) => p.team_id === 1).length;
-  if (mapState.spawn_points.length !== 2 || team0 !== 1 || team1 !== 1) {
-    return "Validation error: spawn_points must include exactly one Team 0 and one Team 1 spawn.";
-  }
-  const ids = new Set(mapState.towers.map((t) => t.id));
-  const seen = new Set();
-  for (const wall of mapState.walls) {
-    if (wall.t1 === wall.t2) return "Validation error: wall cannot connect a tower to itself.";
-    if (!ids.has(wall.t1) || !ids.has(wall.t2)) return "Validation error: wall references a missing tower id.";
-    const a = getTowerByIdFrom(mapState, wall.t1);
-    const b = getTowerByIdFrom(mapState, wall.t2);
-    if (!a || !b) return "Validation error: wall references a missing tower id.";
-    if (a.team_id !== b.team_id || wall.team_id !== a.team_id) {
-      return "Validation error: every wall and its connected towers must share the same team color.";
-    }
-    const key = `${Math.min(wall.t1, wall.t2)}:${Math.max(wall.t1, wall.t2)}`;
-    if (seen.has(key)) return "Validation error: duplicate wall between two towers.";
-    seen.add(key);
-  }
-  if (findWallOverlap(null, mapState)) return "Validation error: walls cannot overlap or intersect.";
-  if (hasTowerOnWallConflict(null, mapState)) return "Validation error: a tower overlaps an existing wall.";
-  return null;
+  const report = getMapValidationReport(mapState);
+  return report.issues.length ? `Validation error: ${report.issues[0].message}` : null;
 }
 
 function importJSON(event) {
@@ -4070,12 +4316,24 @@ function importJSON(event) {
   reader.onload = () => {
     try {
       const parsed = JSON.parse(String(reader.result));
+      const convertedHealthCount = Array.isArray(parsed?.towers)
+        ? parsed.towers.filter((tower) => Number(tower?.health) > GAME.TOWER_MAX_HEALTH).length
+        : 0;
       const imported = parseImportedState(parsed);
       const before = cloneState(state);
       state = imported;
       pushHistory("IMPORT_JSON", before, cloneState(state));
       onStateReplaced();
-      setActionState("JSON imported", "success", true);
+      const report = getMapValidationReport();
+      const conversionNote = convertedHealthCount
+        ? ` Converted ${convertedHealthCount} tower${convertedHealthCount === 1 ? "" : "s"} from 5 HP to ${GAME.TOWER_MAX_HEALTH} HP.`
+        : "";
+      if (report.issues.length) {
+        const additional = report.issues.length > 1 ? ` (+${report.issues.length - 1} more)` : "";
+        setActionState(`JSON imported with validation issues.${conversionNote} ${report.issues[0].message}${additional}`, "warn");
+      } else {
+        setActionState(`JSON imported.${conversionNote}`.trim(), "success", true);
+      }
     } catch (error) {
       alert(`Import failed: ${error.message}`);
       setActionState("Import failed", "error", true);
@@ -4109,7 +4367,7 @@ function parseImportedState(data) {
       team_id: expectInteger(t?.team_id, `towers[${i}].team_id`),
       x: expectNumber(t?.x, `towers[${i}].x`),
       y: expectNumber(t?.y, `towers[${i}].y`),
-      health: clamp(1, expectInteger(t?.health, `towers[${i}].health`), 5),
+      health: clamp(1, expectInteger(t?.health, `towers[${i}].health`), GAME.TOWER_MAX_HEALTH),
       is_invincible: expectBoolean(t?.is_invincible, `towers[${i}].is_invincible`),
     })),
     walls: wallsRaw.map((w, i) => ({ uid: createUid("wall"), id: nextWallLocalId(), t1: expectInteger(w?.t1, `walls[${i}].t1`), t2: expectInteger(w?.t2, `walls[${i}].t2`), team_id: expectInteger(w?.team_id, `walls[${i}].team_id`) })),
@@ -4137,24 +4395,9 @@ function parseImportedState(data) {
     if (towerIds.has(t.id)) throw new Error(`Duplicate tower id ${t.id}.`);
     towerIds.add(t.id);
   });
-  const wallSeen = new Set();
   imported.walls.forEach((w) => {
-    if (w.t1 === w.t2) throw new Error("A wall cannot connect a tower to itself.");
     if (!towerIds.has(w.t1) || !towerIds.has(w.t2)) throw new Error("Wall references a missing tower id.");
-    const key = `${Math.min(w.t1, w.t2)}:${Math.max(w.t1, w.t2)}`;
-    if (wallSeen.has(key)) throw new Error("Duplicate wall connection found.");
-    wallSeen.add(key);
   });
-  imported.walls.forEach((wall) => {
-    const a = getTowerByIdFrom(imported, wall.t1);
-    const b = getTowerByIdFrom(imported, wall.t2);
-    if (!a || !b) throw new Error("Wall references a missing tower id.");
-    if (a.team_id !== b.team_id || wall.team_id !== a.team_id) {
-      throw new Error("Every wall and its connected towers must share the same team color.");
-    }
-  });
-  if (findWallOverlap(null, imported)) throw new Error("Walls cannot overlap or intersect.");
-  if (hasTowerOnWallConflict(null, imported)) throw new Error("A tower overlaps an existing wall.");
 
   return imported;
 }
@@ -4250,7 +4493,7 @@ function hitTest(world) {
 }
 
 function hitTower(world) {
-  const threshold = 44;
+  const threshold = GAME.TOWER_DIAMETER / 2;
   for (let i = state.towers.length - 1; i >= 0; i -= 1) {
     if (distance(world.x, world.y, state.towers[i].x, state.towers[i].y) <= threshold) return state.towers[i];
   }
@@ -4514,7 +4757,7 @@ function isInsideCurrentBoundary(x, y, mapState = state) {
 
 function isPlacementInsideBoundary(type, x, y, item = null, mapState = state) {
   if (!hasUsableBoundary(mapState)) return false;
-  if (type === "tower") return isCircleInsideBoundary(x, y, 44, mapState);
+  if (type === "tower") return isCircleInsideBoundary(x, y, GAME.TOWER_DIAMETER / 2, mapState);
   if (type === "bomb") return isCircleInsideBoundary(x, y, 250, mapState);
   if (type === "spawn") return isSquareInsideBoundary(x, y, (Number(mapState.spawn_protection_size) || 500) / 2, mapState);
   if (type === "structure") {

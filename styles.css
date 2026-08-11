@@ -322,6 +322,22 @@ select:focus {
   pointer-events: none;
 }
 
+.cursor-coordinates {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  min-width: 156px;
+  padding: 5px 8px;
+  border: 1px solid rgba(111, 207, 151, 0.52);
+  border-radius: 7px;
+  background: rgba(4, 9, 16, 0.78);
+  color: #d7f7e3;
+  font-family: "Space Mono", monospace;
+  font-size: 0.78rem;
+  text-align: right;
+  pointer-events: none;
+}
+
 .action-state {
   border: 1px solid rgba(89, 128, 173, 0.45);
   border-radius: 7px;
