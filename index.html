@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Top-Down Shooter Map Editor</title>
+  <title>Cosmowar Map Editor</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -11,7 +11,7 @@
     <aside class="sidebar left-sidebar">
       <div class="sidebar-header">
         <div>
-          <h1>Map Editor</h1>
+          <h1>Cosmowar Map Editor</h1>
         </div>
         <button id="settingsToggleBtn" class="settings-toggle" title="Settings" aria-label="Open settings">
           &#9881;
@@ -26,7 +26,48 @@
           <button class="tool-button" data-tool="spawn">Place Spawn</button>
           <button class="tool-button" data-tool="bomb">Place Bomb Site</button>
           <button class="tool-button" data-tool="build">Build</button>
+          <button class="tool-button" data-tool="mirror">Draw Mirror Axis</button>
         </div>
+
+        <div class="tool-options mirror-options" aria-label="Mirroring controls">
+          <h3>Mirroring</h3>
+          <label class="field">
+            <span>Axis action</span>
+            <select id="mirrorTransformType">
+              <option value="reflect">Reflect across line</option>
+              <option value="rotate">Rotate 180° around line centre</option>
+            </select>
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" id="mirrorLiveInput">
+            <span>Live mirroring</span>
+          </label>
+          <p id="mirrorStatus" class="muted compact-note">No mirror axes. Choose Draw Mirror Axis, then drag a line.</p>
+          <button id="applyMirrorSelectionBtn" class="action-button" type="button">Mirror Selection Once</button>
+          <div class="inline-actions">
+            <button id="removeLastMirrorBtn" class="action-button secondary" type="button">Undo Axis</button>
+            <button id="clearMirrorAxesBtn" class="action-button secondary" type="button">Clear Axes</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel map-presets-panel">
+        <h2>Map Shape</h2>
+        <label class="field">
+          <span>Preset boundary</span>
+          <select id="mapPresetSelect">
+            <option value="square">Square</option>
+            <option value="wide">Wide Rectangle</option>
+            <option value="diamond">Diamond</option>
+            <option value="octagon">Octagon</option>
+            <option value="circle">Round Arena</option>
+          </select>
+        </label>
+        <div class="dimension-grid">
+          <label class="field"><span>Width</span><input id="mapPresetWidth" type="number" min="500" step="100" value="4000"></label>
+          <label class="field"><span>Height</span><input id="mapPresetHeight" type="number" min="500" step="100" value="4000"></label>
+        </div>
+        <button id="applyMapPresetBtn" class="action-button" type="button">Use Preset Boundary</button>
       </section>
 
       <section class="panel default-panel">
@@ -59,7 +100,7 @@
     <div id="leftResizeHandle" class="panel-resize-handle left-panel-handle" role="separator" aria-label="Resize left panel" aria-orientation="vertical"></div>
 
     <main class="workspace">
-      <canvas id="mapCanvas" aria-label="Map editing canvas"></canvas>
+      <canvas id="mapCanvas" aria-label="Cosmowar Map Editor canvas"></canvas>
       <div class="workspace-overlay">Scroll to zoom | Right/Middle drag to pan</div>
       <div id="cursorCoordinates" class="cursor-coordinates hidden" aria-live="polite"></div>
       <section id="settingsPanel" class="panel settings-panel hidden">
@@ -77,9 +118,29 @@
           <input type="number" id="snapStrengthInput" value="20" step="1" min="1">
         </label>
         <label class="checkbox-field">
+          <input type="checkbox" id="objectSnapEnabledInput" checked>
+          <span>Object snapping</span>
+        </label>
+        <label class="checkbox-field">
           <input type="checkbox" id="buildSnapEnabledInput" checked>
           <span>Build mode object snapping</span>
         </label>
+
+        <section class="settings-section" aria-label="Grid settings">
+          <h3>Grid</h3>
+          <label class="checkbox-field">
+            <input type="checkbox" id="gridSnapEnabledInput" checked>
+            <span>Snap to grid</span>
+          </label>
+          <label class="field">
+            <span>Grid size</span>
+            <input type="number" id="gridSizeInput" value="48" step="1" min="4" max="1000">
+          </label>
+          <label class="field">
+            <span>Grid line thickness</span>
+            <input type="number" id="gridLineWidthInput" value="1" step="0.25" min="0.25" max="8">
+          </label>
+        </section>
 
         <section class="multiplayer-settings" aria-label="Multiplayer settings">
           <h3>Multiplayer</h3>
@@ -116,9 +177,11 @@
           <li>Right click or middle click and drag to pan.</li>
           <li>Use WASD or the arrow keys to move around the map.</li>
           <li>Shift/Ctrl/Cmd + click to multi-select in Select / Move.</li>
-          <li>Hold Ctrl to temporarily disable object snapping.</li>
+          <li>Hold Ctrl to temporarily disable object and grid snapping.</li>
           <li>Ctrl+C copies selection; left click places the ghost copy.</li>
           <li>Alt + drag rotates a selected group.</li>
+          <li>Shift + Alt + drag enlarges or shrinks a selected group.</li>
+          <li>Draw one or more mirror axes, then use live mode or mirror a selection once.</li>
           <li>Mouse wheel to zoom at cursor.</li>
         </ul>
       </section>

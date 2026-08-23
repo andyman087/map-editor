@@ -60,7 +60,21 @@ const el = {
   settingsPanel: document.getElementById("settingsPanel"),
   spawnProtectionInput: document.getElementById("spawnProtectionInput"),
   snapStrengthInput: document.getElementById("snapStrengthInput"),
+  objectSnapEnabledInput: document.getElementById("objectSnapEnabledInput"),
   buildSnapEnabledInput: document.getElementById("buildSnapEnabledInput"),
+  gridSnapEnabledInput: document.getElementById("gridSnapEnabledInput"),
+  gridSizeInput: document.getElementById("gridSizeInput"),
+  gridLineWidthInput: document.getElementById("gridLineWidthInput"),
+  mirrorTransformType: document.getElementById("mirrorTransformType"),
+  mirrorLiveInput: document.getElementById("mirrorLiveInput"),
+  mirrorStatus: document.getElementById("mirrorStatus"),
+  applyMirrorSelectionBtn: document.getElementById("applyMirrorSelectionBtn"),
+  removeLastMirrorBtn: document.getElementById("removeLastMirrorBtn"),
+  clearMirrorAxesBtn: document.getElementById("clearMirrorAxesBtn"),
+  mapPresetSelect: document.getElementById("mapPresetSelect"),
+  mapPresetWidth: document.getElementById("mapPresetWidth"),
+  mapPresetHeight: document.getElementById("mapPresetHeight"),
+  applyMapPresetBtn: document.getElementById("applyMapPresetBtn"),
   usernameInput: document.getElementById("usernameInput"),
   hostSessionBtn: document.getElementById("hostSessionBtn"),
   multiplayerToastStack: document.getElementById("multiplayerToastStack"),
@@ -100,7 +114,17 @@ const defaults = {
 
 const editorSettings = {
   snapStrength: GAME.SNAP_THRESHOLD,
+  objectSnapEnabled: true,
   buildModeSnapEnabled: true,
+  gridSnapEnabled: true,
+  gridSize: 48,
+  gridLineWidth: 1,
+};
+
+const mirrorState = {
+  axes: [],
+  liveEnabled: false,
+  applying: false,
 };
 
 const view = { scale: 0.32, offsetX: 130, offsetY: 80 };
@@ -115,6 +139,7 @@ const interaction = {
   panStartOffset: null,
   drag: null,
   rotate: null,
+  resize: null,
   boxSelect: null,
   wallDraft: null,
   hoverTowerId: null,
@@ -125,6 +150,7 @@ const interaction = {
   towerDraftWarnActive: false,
   wallDraftWarnActive: false,
   snapEnabled: true,
+  mirrorDraft: null,
   guides: { x: null, y: null, xPoints: [], yPoints: [] },
 };
 
@@ -1257,6 +1283,7 @@ class RollbackHandler {
 }
 
 restoreSavedSession();
+ensureDefaultBoundary();
 setup();
 
 function setup() {
@@ -1265,12 +1292,20 @@ function setup() {
   setupPanelResizers();
   setupMultiplayer();
   updateTeamSwatches();
+  interaction.snapEnabled = editorSettings.objectSnapEnabled;
   el.snapStrengthInput.value = String(editorSettings.snapStrength);
+  el.objectSnapEnabledInput.checked = editorSettings.objectSnapEnabled;
   el.buildSnapEnabledInput.checked = editorSettings.buildModeSnapEnabled;
+  el.gridSnapEnabledInput.checked = editorSettings.gridSnapEnabled;
+  el.gridSizeInput.value = String(editorSettings.gridSize);
+  el.gridLineWidthInput.value = String(editorSettings.gridLineWidth);
+  el.mirrorLiveInput.checked = mirrorState.liveEnabled;
+  updateMirrorStatus();
   el.towerHealthInput.max = String(GAME.TOWER_MAX_HEALTH);
   el.towerHealthInput.value = String(defaults.towerHealth);
   el.towerInvincibleInput.checked = defaults.towerInvincible;
   resizeCanvas();
+  fitBoundaryInView();
   setMode("select");
   renderSelectionPanel();
   if (!updateInvalidObjectWarning()) setActionState("Idle", "idle");
@@ -1311,7 +1346,7 @@ function updateKeyboardPan(timestamp) {
   view.offsetY += (y / magnitude) * movement;
   interaction.mouseWorld = screenToWorld(interaction.mouseScreen.x, interaction.mouseScreen.y);
   updateCursorCoordinates();
-  if (interaction.mode === "build" || interaction.mode === "boundary") refreshPlacementPreviewFromMouse();
+  if (["build", "boundary", "spawn", "bomb"].includes(interaction.mode)) refreshPlacementPreviewFromMouse();
   requestRender();
 }
 
@@ -1475,6 +1510,70 @@ function bindUI() {
     saveSession();
     setActionState(`Build mode object snapping ${editorSettings.buildModeSnapEnabled ? "enabled" : "disabled"}`, "success", true);
   });
+  el.objectSnapEnabledInput.addEventListener("change", () => {
+    editorSettings.objectSnapEnabled = el.objectSnapEnabledInput.checked;
+    interaction.snapEnabled = editorSettings.objectSnapEnabled;
+    saveSession();
+    refreshPlacementPreviewFromMouse();
+    setActionState(`Object snapping ${editorSettings.objectSnapEnabled ? "enabled" : "disabled"}`, "success", true);
+    requestRender();
+  });
+  el.gridSnapEnabledInput.addEventListener("change", () => {
+    editorSettings.gridSnapEnabled = el.gridSnapEnabledInput.checked;
+    saveSession();
+    refreshPlacementPreviewFromMouse();
+    setActionState(`Snap to grid ${editorSettings.gridSnapEnabled ? "enabled" : "disabled"}`, "success", true);
+    requestRender();
+  });
+  el.gridSizeInput.addEventListener("change", () => {
+    const value = Number(el.gridSizeInput.value);
+    if (!Number.isFinite(value)) {
+      el.gridSizeInput.value = String(editorSettings.gridSize);
+      return;
+    }
+    editorSettings.gridSize = clamp(4, roundTo(value, 2), 1000);
+    el.gridSizeInput.value = String(editorSettings.gridSize);
+    saveSession();
+    refreshPlacementPreviewFromMouse();
+    setActionState(`Grid size: ${editorSettings.gridSize}`, "success", true);
+    requestRender();
+  });
+  el.gridLineWidthInput.addEventListener("change", () => {
+    const value = Number(el.gridLineWidthInput.value);
+    if (!Number.isFinite(value)) {
+      el.gridLineWidthInput.value = String(editorSettings.gridLineWidth);
+      return;
+    }
+    editorSettings.gridLineWidth = clamp(0.25, roundTo(value, 2), 8);
+    el.gridLineWidthInput.value = String(editorSettings.gridLineWidth);
+    saveSession();
+    setActionState(`Grid line thickness: ${editorSettings.gridLineWidth}`, "success", true);
+    requestRender();
+  });
+
+  el.mirrorLiveInput.addEventListener("change", () => {
+    mirrorState.liveEnabled = el.mirrorLiveInput.checked;
+    saveSession();
+    updateMirrorStatus();
+    setActionState(`Live mirroring ${mirrorState.liveEnabled ? "enabled" : "disabled"}`, "success", true);
+    requestRender();
+  });
+  el.applyMirrorSelectionBtn.addEventListener("click", mirrorSelectionOnce);
+  el.removeLastMirrorBtn.addEventListener("click", () => {
+    mirrorState.axes.pop();
+    saveSession();
+    updateMirrorStatus();
+    requestRender();
+  });
+  el.clearMirrorAxesBtn.addEventListener("click", () => {
+    mirrorState.axes = [];
+    interaction.mirrorDraft = null;
+    saveSession();
+    updateMirrorStatus();
+    setActionState("Mirror axes cleared", "idle", true);
+    requestRender();
+  });
+  el.applyMapPresetBtn.addEventListener("click", applySelectedMapPreset);
 
   el.settingsToggleBtn.addEventListener("click", () => {
     setSettingsOpen(el.settingsPanel.classList.contains("hidden"));
@@ -1542,7 +1641,9 @@ function setMode(mode) {
   interaction.mode = mode;
   interaction.drag = null;
   interaction.rotate = null;
+  interaction.resize = null;
   interaction.boxSelect = null;
+  interaction.mirrorDraft = null;
   interaction.buildGhost = null;
   interaction.placementGhost = null;
   interaction.guides = { x: null, y: null, xPoints: [], yPoints: [] };
@@ -1565,6 +1666,7 @@ function toolLabel(mode) {
   if (mode === "spawn") return "Place Spawn";
   if (mode === "bomb") return "Place Bomb Site";
   if (mode === "build") return "Build";
+  if (mode === "mirror") return "Draw Mirror Axis";
   return mode;
 }
 
@@ -1578,7 +1680,7 @@ function updateCursor() {
     return;
   }
   if (interaction.mode === "select") {
-    canvas.style.cursor = interaction.drag ? "grabbing" : "default";
+    canvas.style.cursor = interaction.drag || interaction.rotate || interaction.resize ? "grabbing" : "default";
     return;
   }
   canvas.style.cursor = "crosshair";
@@ -1608,6 +1710,13 @@ function onMouseDown(event) {
   }
   if (interaction.mode === "select") {
     handleSelectDown(event, world);
+    return;
+  }
+  if (interaction.mode === "mirror") {
+    const start = getGridSnappedPoint(world);
+    interaction.mirrorDraft = { start, end: { ...start }, type: el.mirrorTransformType.value === "rotate" ? "rotate" : "reflect" };
+    setActionState("Drag to draw a mirror axis", "idle");
+    requestRender();
     return;
   }
   if (interaction.mode === "boundary") {
@@ -1666,6 +1775,15 @@ function onMouseMove(event) {
     applyRotate(world);
     requestRender();
   }
+  if (interaction.resize) {
+    applyResize(world);
+    requestRender();
+  }
+  if (interaction.mirrorDraft) {
+    interaction.mirrorDraft.end = getGridSnappedPoint(world);
+    requestRender();
+    return;
+  }
   if (interaction.wallDraft) {
     interaction.wallDraft.mouse = { ...world };
     const hover = hitTower(world);
@@ -1687,24 +1805,26 @@ function onMouseMove(event) {
     };
     requestRender();
   } else if (interaction.mode === "spawn") {
+    const target = getPlacementSnapPreview(world);
     interaction.buildGhost = null;
     interaction.placementGhost = {
       type: "spawn",
-      x: world.x,
-      y: world.y,
-      invalid: !isPlacementInsideBoundary("spawn", world.x, world.y),
+      x: target.x,
+      y: target.y,
+      invalid: !isPlacementInsideBoundary("spawn", target.x, target.y),
     };
-    interaction.guides = { x: null, y: null, xPoints: [], yPoints: [] };
+    interaction.guides = { x: target.guideX, y: target.guideY, xPoints: target.xPoints, yPoints: target.yPoints };
     requestRender();
   } else if (interaction.mode === "bomb") {
+    const target = getPlacementSnapPreview(world);
     interaction.buildGhost = null;
     interaction.placementGhost = {
       type: "bomb",
-      x: world.x,
-      y: world.y,
-      invalid: !isPlacementInsideBoundary("bomb", world.x, world.y),
+      x: target.x,
+      y: target.y,
+      invalid: !isPlacementInsideBoundary("bomb", target.x, target.y),
     };
-    interaction.guides = { x: null, y: null, xPoints: [], yPoints: [] };
+    interaction.guides = { x: target.guideX, y: target.guideY, xPoints: target.xPoints, yPoints: target.yPoints };
     requestRender();
   } else if (interaction.mode === "boundary") {
     interaction.buildGhost = null;
@@ -1750,6 +1870,12 @@ function refreshPlacementPreviewFromMouse() {
       xPoints: preview.xPoints,
       yPoints: preview.yPoints,
     };
+  } else if (interaction.mode === "spawn" || interaction.mode === "bomb") {
+    const preview = getPlacementSnapPreview(world);
+    const type = interaction.mode;
+    interaction.buildGhost = null;
+    interaction.placementGhost = { type, x: preview.x, y: preview.y, invalid: !isPlacementInsideBoundary(type, preview.x, preview.y) };
+    interaction.guides = { x: preview.guideX, y: preview.guideY, xPoints: preview.xPoints, yPoints: preview.yPoints };
   }
 }
 
@@ -1761,6 +1887,8 @@ function onMouseUp() {
   if (interaction.boxSelect) finishBoxSelection();
   if (interaction.drag) finishDrag();
   if (interaction.rotate) finishRotate();
+  if (interaction.resize) finishResize();
+  if (interaction.mirrorDraft) finishMirrorAxis();
 
   updateCursor();
   requestRender();
@@ -1783,7 +1911,7 @@ function onKeyDown(event) {
   const key = event.key.toLowerCase();
   const mod = event.ctrlKey || event.metaKey;
   interaction.snapTemporarilyDisabled = event.ctrlKey;
-  if (interaction.mode === "build" || interaction.mode === "boundary") {
+  if (["build", "boundary", "spawn", "bomb"].includes(interaction.mode)) {
     refreshPlacementPreviewFromMouse();
     requestRender();
   }
@@ -1814,6 +1942,8 @@ function onKeyDown(event) {
     interaction.boxSelect = null;
     interaction.drag = null;
     interaction.rotate = null;
+    interaction.resize = null;
+    interaction.mirrorDraft = null;
     interaction.pasteDraft = null;
     interaction.guides = { x: null, y: null, xPoints: [], yPoints: [] };
     setActionState("Draft actions cancelled", "idle", true);
@@ -1839,7 +1969,7 @@ function onKeyDown(event) {
 function onKeyUp(event) {
   keyboardPanKeys.delete(event.key.toLowerCase());
   interaction.snapTemporarilyDisabled = event.ctrlKey;
-  if (interaction.mode === "build" || interaction.mode === "boundary") {
+  if (["build", "boundary", "spawn", "bomb"].includes(interaction.mode)) {
     refreshPlacementPreviewFromMouse();
     requestRender();
   }
@@ -1888,7 +2018,8 @@ function worldToScreen(worldX, worldY) {
 
 function handleSelectDown(event, world) {
   const hit = hitTest(world);
-  const multiModifier = event.shiftKey || event.ctrlKey || event.metaKey;
+  const transformGesture = event.altKey;
+  const multiModifier = !transformGesture && (event.shiftKey || event.ctrlKey || event.metaKey);
   if (!hit) {
     interaction.boxSelect = {
       start: { ...world },
@@ -1917,20 +2048,43 @@ function handleSelectDown(event, world) {
     selection.add(key);
     renderSelectionPanel();
   }
+  const transformable = getTransformableSelectionKeys();
+  if (event.altKey && event.shiftKey) {
+    if (transformable.length > 1 || canResizeSingleSelection(transformable)) startResize(transformable, world);
+    else setActionState("Select a group, connected wall, or structure to resize", "warn", true);
+    return;
+  }
+  if (event.altKey && transformable.length > 1) {
+    startRotate(transformable, world);
+    return;
+  }
   if (!hit.movable) {
     requestRender();
     return;
   }
   const movable = getMovableSelectionKeys();
-  if (event.altKey && movable.length > 1) {
-    startRotate(movable, world);
-    return;
-  }
   startDrag(movable.length > 0 ? movable : [key], key, world);
 }
 
 function getMovableSelectionKeys() {
   return getSelectionEntries().filter((entry) => entry.movable).map((entry) => entry.key);
+}
+
+function getTransformableSelectionKeys() {
+  const keys = new Set(getMovableSelectionKeys());
+  getSelectionEntries().forEach((entry) => {
+    if (entry.type !== "wall") return;
+    const a = getTowerById(entry.item.t1);
+    const b = getTowerById(entry.item.t2);
+    if (a) keys.add(makeKey("tower", a.uid));
+    if (b) keys.add(makeKey("tower", b.uid));
+  });
+  return Array.from(keys);
+}
+
+function canResizeSingleSelection(keys) {
+  if (keys.length !== 1) return false;
+  return resolveKey(keys[0])?.type === "structure";
 }
 
 function startDrag(keysToDrag, primaryKey, world) {
@@ -1964,7 +2118,7 @@ function applyDrag(world) {
   const rawDy = world.y - drag.startMouse.y;
   const targetX = anchorStart.x + rawDx;
   const targetY = anchorStart.y + rawDy;
-  const snap = interaction.snapEnabled && !interaction.snapTemporarilyDisabled
+  const snap = isAnySnappingEnabled() && !interaction.snapTemporarilyDisabled
     ? getSnapResult(targetX, targetY, new Set(drag.keys))
     : { x: targetX, y: targetY, guideX: null, guideY: null, xPoints: [], yPoints: [] };
   const dx = snap.x - anchorStart.x;
@@ -2024,6 +2178,7 @@ function finishDrag() {
   interaction.guides = { x: null, y: null, xPoints: [], yPoints: [] };
   updateCursor();
   if (!drag || !drag.moved) return;
+  applyLiveMirroring(drag.beforeState);
   pushHistory("MOVE_MULTI", drag.beforeState, cloneState(state));
   onStateChanged();
 }
@@ -2097,6 +2252,7 @@ function finishRotate() {
   const invalidReason = rotate && rotate.invalidReason;
   interaction.rotate = null;
   if (!rotate || !rotate.moved) return;
+  applyLiveMirroring(rotate.beforeState);
   pushHistory("ROTATE_MULTI", rotate.beforeState, cloneState(state));
   onStateChanged();
   if (invalidReason) setActionState(`${invalidReason} Export validation may fail.`, "warn");
@@ -2222,7 +2378,7 @@ function finishBoxSelection() {
 function placeSpawn(world) {
   const target = interaction.placementGhost && interaction.placementGhost.type === "spawn"
     ? interaction.placementGhost
-    : { x: world.x, y: world.y };
+    : getPlacementSnapPreview(world);
   if (!isPlacementInsideBoundary("spawn", target.x, target.y)) {
     setActionState("Cannot place spawn outside map boundary.", "warn", true);
     return;
@@ -2253,7 +2409,7 @@ function placeSpawn(world) {
 function placeBomb(world) {
   const target = interaction.placementGhost && interaction.placementGhost.type === "bomb"
     ? interaction.placementGhost
-    : { x: world.x, y: world.y };
+    : getPlacementSnapPreview(world);
   if (!isPlacementInsideBoundary("bomb", target.x, target.y)) {
     setActionState("Cannot place bomb site outside map boundary.", "warn", true);
     return;
@@ -2454,11 +2610,12 @@ function getBuildPlacementTarget(world, startTower = null) {
 }
 
 function getBuildPlacementPreview(world, startTower = null) {
-  if (!editorSettings.buildModeSnapEnabled || !interaction.snapEnabled || interaction.snapTemporarilyDisabled) {
+  const objectEnabled = editorSettings.buildModeSnapEnabled && interaction.snapEnabled && editorSettings.objectSnapEnabled;
+  if ((!objectEnabled && !editorSettings.gridSnapEnabled) || interaction.snapTemporarilyDisabled) {
     return { x: world.x, y: world.y, guideX: null, guideY: null, xPoints: [], yPoints: [] };
   }
   const exclude = new Set();
-  return getSnapResult(world.x, world.y, exclude);
+  return getSnapResult(world.x, world.y, exclude, { object: objectEnabled, grid: true });
 }
 
 function getBoundaryPlacementPreview(world) {
@@ -2475,15 +2632,20 @@ function getBoundaryPlacementPreview(world) {
     if (dx <= threshold && (!bestX || dx < bestX.delta)) bestX = { value: candidate.x, delta: dx };
     if (dy <= threshold && (!bestY || dy < bestY.delta)) bestY = { value: candidate.y, delta: dy };
   });
-  const x = bestX ? bestX.value : world.x;
-  const y = bestY ? bestY.value : world.y;
+  const grid = getSnapResult(world.x, world.y, new Set(), { object: false, grid: true });
+  const gridDx = Math.abs(grid.x - world.x);
+  const gridDy = Math.abs(grid.y - world.y);
+  const useObjectX = bestX && (!editorSettings.gridSnapEnabled || bestX.delta <= gridDx);
+  const useObjectY = bestY && (!editorSettings.gridSnapEnabled || bestY.delta <= gridDy);
+  const x = useObjectX ? bestX.value : grid.x;
+  const y = useObjectY ? bestY.value : grid.y;
   return {
     x,
     y,
-    guideX: bestX ? x : null,
-    guideY: bestY ? y : null,
-    xPoints: bestX ? candidates.filter((candidate) => Math.abs(candidate.x - x) <= 0.001) : [],
-    yPoints: bestY ? candidates.filter((candidate) => Math.abs(candidate.y - y) <= 0.001) : [],
+    guideX: useObjectX ? x : grid.guideX,
+    guideY: useObjectY ? y : grid.guideY,
+    xPoints: useObjectX ? candidates.filter((candidate) => Math.abs(candidate.x - x) <= 0.001) : [],
+    yPoints: useObjectY ? candidates.filter((candidate) => Math.abs(candidate.y - y) <= 0.001) : [],
   };
 }
 
@@ -2557,7 +2719,7 @@ function startPasteDraft() {
 
 function updatePasteDraft(world) {
   if (!interaction.pasteDraft) return;
-  interaction.pasteDraft.center = { ...world };
+  interaction.pasteDraft.center = getGridSnappedPoint(world);
   interaction.pasteDraft.invalid = !validatePasteDraft(interaction.pasteDraft).valid;
 }
 
@@ -2710,8 +2872,10 @@ function commitPasteDraft() {
   setActionState("Pasted selection", "success", true);
 }
 
-function getSnapResult(targetX, targetY, excludeKeys) {
-  const candidates = getGuideCandidates(excludeKeys);
+function getSnapResult(targetX, targetY, excludeKeys = new Set(), options = {}) {
+  const allowObject = options.object !== false && interaction.snapEnabled && editorSettings.objectSnapEnabled;
+  const allowGrid = options.grid !== false && editorSettings.gridSnapEnabled;
+  const candidates = allowObject ? getGuideCandidates(excludeKeys) : [];
   const threshold = editorSettings.snapStrength / Math.max(view.scale, 0.0001);
   let bestX = null;
   let bestY = null;
@@ -2721,16 +2885,38 @@ function getSnapResult(targetX, targetY, excludeKeys) {
     if (dx <= threshold && (!bestX || dx < bestX.delta)) bestX = { value: c.x, delta: dx };
     if (dy <= threshold && (!bestY || dy < bestY.delta)) bestY = { value: c.y, delta: dy };
   });
-  const x = bestX ? bestX.value : targetX;
-  const y = bestY ? bestY.value : targetY;
+  const gridSize = Math.max(4, Number(editorSettings.gridSize) || 48);
+  const gridX = Math.round(targetX / gridSize) * gridSize;
+  const gridY = Math.round(targetY / gridSize) * gridSize;
+  const useObjectX = bestX && (!allowGrid || bestX.delta <= Math.abs(gridX - targetX));
+  const useObjectY = bestY && (!allowGrid || bestY.delta <= Math.abs(gridY - targetY));
+  const x = useObjectX ? bestX.value : (allowGrid ? gridX : targetX);
+  const y = useObjectY ? bestY.value : (allowGrid ? gridY : targetY);
   return {
     x,
     y,
-    guideX: bestX ? x : null,
-    guideY: bestY ? y : null,
-    xPoints: bestX ? candidates.filter((c) => Math.abs(c.x - x) <= 0.001).slice(0, 30) : [],
-    yPoints: bestY ? candidates.filter((c) => Math.abs(c.y - y) <= 0.001).slice(0, 30) : [],
+    guideX: useObjectX || allowGrid ? x : null,
+    guideY: useObjectY || allowGrid ? y : null,
+    xPoints: useObjectX ? candidates.filter((c) => Math.abs(c.x - x) <= 0.001).slice(0, 30) : [],
+    yPoints: useObjectY ? candidates.filter((c) => Math.abs(c.y - y) <= 0.001).slice(0, 30) : [],
   };
+}
+
+function isAnySnappingEnabled() {
+  return editorSettings.gridSnapEnabled || (interaction.snapEnabled && editorSettings.objectSnapEnabled);
+}
+
+function getPlacementSnapPreview(world) {
+  if (interaction.snapTemporarilyDisabled || !isAnySnappingEnabled()) {
+    return { x: world.x, y: world.y, guideX: null, guideY: null, xPoints: [], yPoints: [] };
+  }
+  return getSnapResult(world.x, world.y, new Set());
+}
+
+function getGridSnappedPoint(world) {
+  if (!editorSettings.gridSnapEnabled || interaction.snapTemporarilyDisabled) return { x: world.x, y: world.y };
+  const snapped = getSnapResult(world.x, world.y, new Set(), { object: false, grid: true });
+  return { x: snapped.x, y: snapped.y };
 }
 
 function getGuideCandidates(excludeKeys = new Set()) {
@@ -2789,7 +2975,7 @@ function bindTeamSwatchGroup(container, currentTeam, onChange) {
 function snapToggleMarkup() {
   return `
     <label class="checkbox-field">
-      <input id="selSnapEnabled" type="checkbox" ${interaction.snapEnabled ? "checked" : ""}>
+      <input id="selSnapEnabled" type="checkbox" ${editorSettings.objectSnapEnabled ? "checked" : ""}>
       <span>Enable object snapping</span>
     </label>
   `;
@@ -2800,6 +2986,9 @@ function bindSnapToggle() {
   if (!toggle) return;
   toggle.addEventListener("change", () => {
     interaction.snapEnabled = toggle.checked;
+    editorSettings.objectSnapEnabled = toggle.checked;
+    el.objectSnapEnabledInput.checked = toggle.checked;
+    saveSession();
     setActionState(`Object snapping ${interaction.snapEnabled ? "enabled" : "disabled"}`, "success", true);
   });
 }
@@ -3117,6 +3306,7 @@ function withAction(type, mutator) {
   const before = cloneState(state);
   const changed = mutator();
   if (!changed) return false;
+  if (type !== "MIRROR_SELECTION" && type !== "APPLY_MAP_PRESET") applyLiveMirroring(before);
   pushHistory(type, before, cloneState(state));
   onStateChanged();
   return true;
@@ -3183,7 +3373,9 @@ function onStateReplaced() {
   interaction.wallDraftWarnActive = false;
   interaction.drag = null;
   interaction.rotate = null;
+  interaction.resize = null;
   interaction.boxSelect = null;
+  interaction.mirrorDraft = null;
   interaction.guides = { x: null, y: null, xPoints: [], yPoints: [] };
   hydrateCountersFromState();
   sanitizeSelection();
@@ -3209,6 +3401,24 @@ function restoreSavedSession() {
     }
     if (typeof saved?.editorSettings?.buildModeSnapEnabled === "boolean") {
       editorSettings.buildModeSnapEnabled = saved.editorSettings.buildModeSnapEnabled;
+    }
+    if (typeof saved?.editorSettings?.objectSnapEnabled === "boolean") {
+      editorSettings.objectSnapEnabled = saved.editorSettings.objectSnapEnabled;
+    }
+    if (typeof saved?.editorSettings?.gridSnapEnabled === "boolean") {
+      editorSettings.gridSnapEnabled = saved.editorSettings.gridSnapEnabled;
+    }
+    if (Number.isFinite(saved?.editorSettings?.gridSize)) {
+      editorSettings.gridSize = clamp(4, Number(saved.editorSettings.gridSize), 1000);
+    }
+    if (Number.isFinite(saved?.editorSettings?.gridLineWidth)) {
+      editorSettings.gridLineWidth = clamp(0.25, Number(saved.editorSettings.gridLineWidth), 8);
+    }
+    if (Array.isArray(saved?.mirrorState?.axes)) {
+      mirrorState.axes = saved.mirrorState.axes.filter(isUsableMirrorAxis).slice(-8);
+    }
+    if (typeof saved?.mirrorState?.liveEnabled === "boolean") {
+      mirrorState.liveEnabled = saved.mirrorState.liveEnabled;
     }
     if ([-1, 0, 1].includes(saved?.defaults?.defaultTeam)) {
       defaults.defaultTeam = saved.defaults.defaultTeam;
@@ -3240,6 +3450,7 @@ function saveSession() {
         redo: history.redo.slice(-history.limit),
       },
       editorSettings,
+      mirrorState: { axes: mirrorState.axes, liveEnabled: mirrorState.liveEnabled },
       defaults,
     }));
   } catch (error) {
@@ -3440,6 +3651,7 @@ function draw() {
   ctx.fillStyle = COLORS.bg;
   ctx.fillRect(0, 0, viewport.width, viewport.height);
   drawGrid();
+  drawMirrorAxes();
   drawBoundaryFogMask();
   drawBoundary();
   drawBombSites();
@@ -3448,9 +3660,11 @@ function draw() {
   drawTowerChainGhostWall();
   drawSpawns();
   drawTowers();
+  drawSelectionTransformBounds();
   drawBuildGhostTower();
   drawPlacementGhost();
   drawPasteDraft();
+  drawLiveMirrorPreview();
   multiplayerManager?.drawCursors();
   drawGuides();
   drawWallDraft();
@@ -3463,13 +3677,13 @@ function drawGrid() {
   const right = screenToWorld(viewport.width, 0).x;
   const top = screenToWorld(0, 0).y;
   const bottom = screenToWorld(0, viewport.height).y;
-  const cell = 48;
+  const cell = Math.max(4, Number(editorSettings.gridSize) || 48);
   const majorCell = cell * 5;
   const xStart = Math.floor(left / cell) * cell;
   const yStart = Math.floor(top / cell) * cell;
 
   ctx.strokeStyle = COLORS.gridMinor;
-  ctx.lineWidth = 1;
+  ctx.lineWidth = Math.max(0.25, Number(editorSettings.gridLineWidth) || 1);
 
   for (let x = xStart; x <= right; x += cell) {
     if (Math.abs(x % majorCell) < 0.001) continue;
@@ -3492,7 +3706,7 @@ function drawGrid() {
   const majorXStart = Math.floor(left / majorCell) * majorCell;
   const majorYStart = Math.floor(top / majorCell) * majorCell;
   ctx.strokeStyle = COLORS.gridMajor;
-  ctx.lineWidth = 1.5;
+  ctx.lineWidth = Math.max(0.25, Number(editorSettings.gridLineWidth) || 1) * 1.5;
 
   for (let x = majorXStart; x <= right; x += majorCell) {
     const sx = worldToScreen(x, 0).x;
@@ -3512,7 +3726,7 @@ function drawGrid() {
 
   // Emphasize the world axes so the map's horizontal and vertical halves are easy to read.
   ctx.strokeStyle = "#7C95AA";
-  ctx.lineWidth = 2.25;
+  ctx.lineWidth = Math.max(0.25, Number(editorSettings.gridLineWidth) || 1) * 2.25;
   if (left <= 0 && right >= 0) {
     const sx = worldToScreen(0, 0).x;
     ctx.beginPath();
@@ -4280,6 +4494,675 @@ function parseImportedState(data) {
   return imported;
 }
 
+function drawMirrorAxes() {
+  const axes = [...mirrorState.axes];
+  if (interaction.mirrorDraft) axes.push({ type: interaction.mirrorDraft.type, a: interaction.mirrorDraft.start, b: interaction.mirrorDraft.end, draft: true });
+  axes.forEach((axis, index) => {
+    if (!isUsableMirrorAxis(axis)) return;
+    const a = worldToScreen(axis.a.x, axis.a.y);
+    const b = worldToScreen(axis.b.x, axis.b.y);
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const length = Math.hypot(dx, dy) || 1;
+    const ux = dx / length;
+    const uy = dy / length;
+    const extension = Math.hypot(viewport.width, viewport.height) * 2;
+    ctx.save();
+    ctx.setLineDash(axis.type === "rotate" ? [12, 8] : axis.draft ? [8, 6] : []);
+    ctx.lineWidth = axis.draft ? 2.5 : 1.75;
+    ctx.strokeStyle = axis.type === "rotate" ? "rgba(255, 128, 220, 0.9)" : "rgba(111, 207, 231, 0.88)";
+    ctx.beginPath();
+    ctx.moveTo(a.x - ux * extension, a.y - uy * extension);
+    ctx.lineTo(b.x + ux * extension, b.y + uy * extension);
+    ctx.stroke();
+    const center = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    ctx.setLineDash([]);
+    ctx.fillStyle = axis.type === "rotate" ? "#FF80DC" : "#6FCFE7";
+    ctx.beginPath();
+    ctx.arc(center.x, center.y, axis.type === "rotate" ? 6 : 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.font = "11px Space Mono, monospace";
+    ctx.fillText(axis.type === "rotate" ? "180°" : `M${index + 1}`, center.x + 8, center.y - 8);
+    ctx.restore();
+  });
+}
+
+function drawSelectionTransformBounds() {
+  if (interaction.mode !== "select" || interaction.drag) return;
+  const keys = getTransformableSelectionKeys();
+  if (keys.length < 2 && !canResizeSingleSelection(keys)) return;
+  const entries = keys.map(resolveKey).filter(Boolean);
+  if (!entries.length) return;
+  const points = entries.map((entry) => worldToScreen(entry.item.x, entry.item.y));
+  let minX = Math.min(...points.map((point) => point.x));
+  let maxX = Math.max(...points.map((point) => point.x));
+  let minY = Math.min(...points.map((point) => point.y));
+  let maxY = Math.max(...points.map((point) => point.y));
+  entries.forEach((entry, index) => {
+    const padding = entry.type === "structure" ? (entry.item.size / 2) * view.scale : 22 * view.scale;
+    minX = Math.min(minX, points[index].x - padding);
+    maxX = Math.max(maxX, points[index].x + padding);
+    minY = Math.min(minY, points[index].y - padding);
+    maxY = Math.max(maxY, points[index].y + padding);
+  });
+  ctx.save();
+  ctx.setLineDash([7, 5]);
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = interaction.resize ? "rgba(255, 224, 138, 0.95)" : "rgba(116, 200, 255, 0.8)";
+  ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
+  ctx.setLineDash([]);
+  [[minX, minY], [maxX, minY], [maxX, maxY], [minX, maxY]].forEach(([x, y]) => {
+    ctx.fillStyle = "#FFE08A";
+    ctx.fillRect(x - 4, y - 4, 8, 8);
+  });
+  ctx.restore();
+}
+
+function drawLiveMirrorPreview() {
+  const previewAxes = interaction.mirrorDraft
+    ? [...mirrorState.axes, { type: interaction.mirrorDraft.type, a: interaction.mirrorDraft.start, b: interaction.mirrorDraft.end }]
+    : mirrorState.axes;
+  if (!previewAxes.length) return;
+  const previewEntries = [];
+  const activeTransform = interaction.drag || interaction.rotate || interaction.resize;
+  if (mirrorState.liveEnabled && activeTransform) {
+    const keys = activeTransform.keys || [];
+    keys.forEach((key) => {
+      const entry = resolveKey(key);
+      if (entry) previewEntries.push({ type: entry.type, item: entry.item });
+    });
+  } else if (interaction.mirrorDraft) {
+    getTransformableSelectionKeys().forEach((key) => {
+      const entry = resolveKey(key);
+      if (entry) previewEntries.push({ type: entry.type, item: entry.item });
+    });
+  }
+  if (mirrorState.liveEnabled && interaction.buildGhost) previewEntries.push({ type: "tower", item: interaction.buildGhost });
+  if (mirrorState.liveEnabled && interaction.placementGhost) previewEntries.push({ type: interaction.placementGhost.type, item: interaction.placementGhost });
+  if (mirrorState.liveEnabled && interaction.pasteDraft) {
+    const entities = getPasteDraftEntities(interaction.pasteDraft);
+    entities.towers.forEach((item) => previewEntries.push({ type: "tower", item }));
+    entities.spawns.forEach((item) => previewEntries.push({ type: "spawn", item }));
+    entities.bombs.forEach((item) => previewEntries.push({ type: "bomb", item }));
+    entities.structures.forEach((item) => previewEntries.push({ type: "structure", item }));
+  }
+  if (!previewEntries.length) return;
+  ctx.save();
+  ctx.globalAlpha = 0.48;
+  previewEntries.forEach((entry) => {
+    getMirroredPointVariants(entry.item, previewAxes).forEach((variant) => drawMirrorPreviewEntity(entry.type, entry.item, variant.point));
+  });
+  if (activeTransform) {
+    const keySet = new Set(activeTransform.keys || []);
+    state.walls.forEach((wall) => {
+      const a = getTowerById(wall.t1);
+      const b = getTowerById(wall.t2);
+      if (!a || !b || !keySet.has(makeKey("tower", a.uid)) || !keySet.has(makeKey("tower", b.uid))) return;
+      getMirrorTransformVariants(previewAxes).forEach((variant) => {
+        const mirrorA = transformPointByAxes(a, variant.axes);
+        const mirrorB = transformPointByAxes(b, variant.axes);
+        const ma = worldToScreen(mirrorA.x, mirrorA.y);
+        const mb = worldToScreen(mirrorB.x, mirrorB.y);
+        ctx.lineWidth = GAME.WALL_THICKNESS * view.scale;
+        ctx.strokeStyle = withAlpha(getTeamColor(wall.team_id), 0.7);
+        ctx.beginPath();
+        ctx.moveTo(ma.x, ma.y);
+        ctx.lineTo(mb.x, mb.y);
+        ctx.stroke();
+      });
+    });
+  }
+  if (mirrorState.liveEnabled && interaction.buildGhost) {
+    const startTower = getAutoWallStartTower();
+    if (startTower) {
+      getMirrorTransformVariants(previewAxes).forEach((variant) => {
+        const mirrorStart = transformPointByAxes(startTower, variant.axes);
+        const mirrorEnd = transformPointByAxes(interaction.buildGhost, variant.axes);
+        const start = worldToScreen(mirrorStart.x, mirrorStart.y);
+        const end = worldToScreen(mirrorEnd.x, mirrorEnd.y);
+        ctx.lineCap = "round";
+        ctx.lineWidth = GAME.WALL_THICKNESS * view.scale;
+        ctx.strokeStyle = withAlpha(getTeamColor(startTower.team_id), 0.72);
+        ctx.beginPath();
+        ctx.moveTo(start.x, start.y);
+        ctx.lineTo(end.x, end.y);
+        ctx.stroke();
+      });
+    }
+  }
+  ctx.restore();
+}
+
+function drawMirrorPreviewEntity(type, item, point) {
+  const p = worldToScreen(point.x, point.y);
+  ctx.strokeStyle = withAlpha(COLORS.guide, 0.95);
+  ctx.fillStyle = withAlpha(getTeamColor(item.team_id), 0.5);
+  ctx.lineWidth = 2;
+  if (type === "tower") {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, (GAME.TOWER_DIAMETER / 2) * view.scale, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  } else if (type === "spawn") {
+    const size = (Number(state.spawn_protection_size) || 500) * view.scale;
+    ctx.fillRect(p.x - size / 2, p.y - size / 2, size, size);
+    ctx.strokeRect(p.x - size / 2, p.y - size / 2, size, size);
+  } else if (type === "bomb") {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 250 * view.scale, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  } else if (type === "structure") {
+    const size = (Number(item.size) || 130) * view.scale;
+    ctx.fillRect(p.x - size / 2, p.y - size / 2, size, size);
+    ctx.strokeRect(p.x - size / 2, p.y - size / 2, size, size);
+  } else if (type === "boundary") {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+}
+
+function applySelectedMapPreset() {
+  const preset = el.mapPresetSelect.value;
+  let width = clamp(500, Number(el.mapPresetWidth.value) || 4000, 50000);
+  let height = clamp(500, Number(el.mapPresetHeight.value) || 4000, 50000);
+  if (preset === "square") height = width;
+  if (preset === "wide" && Math.abs(width - height) < 0.001) height = width * 0.625;
+  el.mapPresetWidth.value = String(roundTo(width, 1));
+  el.mapPresetHeight.value = String(roundTo(height, 1));
+  const points = getMapPresetPoints(preset, width, height);
+  if (!points.length) return;
+  const hasPlacedContent = state.towers.length || state.walls.length || state.spawn_points.length || state.bomb_sites.length || state.structures.length;
+  if (hasPlacedContent && !confirm("Replace the current boundary with this preset? Existing objects will be kept.")) return;
+  withAction("APPLY_MAP_PRESET", () => {
+    state.map_boundaries = points.map((point) => ({ uid: createUid("boundary"), x: roundTo(point.x, 3), y: roundTo(point.y, 3) }));
+    selection.clear();
+    return true;
+  });
+  fitBoundaryInView();
+  setActionState(`${preset === "circle" ? "Round arena" : preset[0].toUpperCase() + preset.slice(1)} boundary applied`, "success", true);
+}
+
+function getMapPresetPoints(preset, width, height) {
+  const halfW = width / 2;
+  const halfH = height / 2;
+  if (preset === "diamond") return [{ x: 0, y: -halfH }, { x: halfW, y: 0 }, { x: 0, y: halfH }, { x: -halfW, y: 0 }];
+  if (preset === "octagon") {
+    const inset = 0.292893;
+    return [
+      { x: -halfW * (1 - inset), y: -halfH }, { x: halfW * (1 - inset), y: -halfH },
+      { x: halfW, y: -halfH * (1 - inset) }, { x: halfW, y: halfH * (1 - inset) },
+      { x: halfW * (1 - inset), y: halfH }, { x: -halfW * (1 - inset), y: halfH },
+      { x: -halfW, y: halfH * (1 - inset) }, { x: -halfW, y: -halfH * (1 - inset) },
+    ];
+  }
+  if (preset === "circle") {
+    return Array.from({ length: 16 }, (_, index) => {
+      const angle = -Math.PI / 2 + (index / 16) * Math.PI * 2;
+      return { x: Math.cos(angle) * halfW, y: Math.sin(angle) * halfH };
+    });
+  }
+  return [{ x: -halfW, y: -halfH }, { x: halfW, y: -halfH }, { x: halfW, y: halfH }, { x: -halfW, y: halfH }];
+}
+
+function fitBoundaryInView() {
+  if (!state.map_boundaries.length) return;
+  const xs = state.map_boundaries.map((point) => point.x);
+  const ys = state.map_boundaries.map((point) => point.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const width = Math.max(1, maxX - minX);
+  const height = Math.max(1, maxY - minY);
+  view.scale = clamp(GAME.MIN_ZOOM, Math.min((viewport.width - 100) / width, (viewport.height - 100) / height), GAME.MAX_ZOOM);
+  view.offsetX = viewport.width / 2 - ((minX + maxX) / 2) * view.scale;
+  view.offsetY = viewport.height / 2 - ((minY + maxY) / 2) * view.scale;
+  requestRender();
+}
+
+function finishMirrorAxis() {
+  const draft = interaction.mirrorDraft;
+  interaction.mirrorDraft = null;
+  if (!draft || distance(draft.start.x, draft.start.y, draft.end.x, draft.end.y) < 20 / Math.max(view.scale, 0.001)) {
+    setActionState("Mirror axis was too short", "warn", true);
+    requestRender();
+    return;
+  }
+  mirrorState.axes.push({
+    type: draft.type === "rotate" ? "rotate" : "reflect",
+    a: { x: roundTo(draft.start.x, 3), y: roundTo(draft.start.y, 3) },
+    b: { x: roundTo(draft.end.x, 3), y: roundTo(draft.end.y, 3) },
+  });
+  if (mirrorState.axes.length > 8) mirrorState.axes.shift();
+  saveSession();
+  updateMirrorStatus();
+  setActionState(`${draft.type === "rotate" ? "Rotational centre" : "Mirror axis"} added`, "success", true);
+  requestRender();
+}
+
+function updateMirrorStatus() {
+  if (!el.mirrorStatus) return;
+  const count = mirrorState.axes.length;
+  if (!count) {
+    el.mirrorStatus.textContent = "No mirror axes. Choose Draw Mirror Axis, then drag a line.";
+  } else {
+    el.mirrorStatus.textContent = `${count} active ${count === 1 ? "axis" : "axes"}. ${mirrorState.liveEnabled ? "Live mirroring is on." : "Use Mirror Selection Once or enable live mode."}`;
+  }
+  el.applyMirrorSelectionBtn.disabled = count === 0;
+  el.removeLastMirrorBtn.disabled = count === 0;
+  el.clearMirrorAxesBtn.disabled = count === 0;
+}
+
+function isUsableMirrorAxis(axis) {
+  return Boolean(axis && (axis.type === "reflect" || axis.type === "rotate")
+    && Number.isFinite(axis.a?.x) && Number.isFinite(axis.a?.y)
+    && Number.isFinite(axis.b?.x) && Number.isFinite(axis.b?.y)
+    && distance(axis.a.x, axis.a.y, axis.b.x, axis.b.y) > 0.001);
+}
+
+function transformPointByAxis(point, axis) {
+  if (axis.type === "rotate") {
+    const cx = (axis.a.x + axis.b.x) / 2;
+    const cy = (axis.a.y + axis.b.y) / 2;
+    return { x: cx * 2 - point.x, y: cy * 2 - point.y };
+  }
+  const dx = axis.b.x - axis.a.x;
+  const dy = axis.b.y - axis.a.y;
+  const lengthSq = dx * dx + dy * dy;
+  if (lengthSq <= 0.000001) return { ...point };
+  const t = ((point.x - axis.a.x) * dx + (point.y - axis.a.y) * dy) / lengthSq;
+  const px = axis.a.x + t * dx;
+  const py = axis.a.y + t * dy;
+  return { x: px * 2 - point.x, y: py * 2 - point.y };
+}
+
+function transformPointByAxes(point, axes) {
+  return axes.reduce((current, axis) => transformPointByAxis(current, axis), { x: point.x, y: point.y });
+}
+
+function getMirrorTransformVariants(sourceAxes = mirrorState.axes) {
+  let variants = [{ axes: [], key: "identity" }];
+  sourceAxes.filter(isUsableMirrorAxis).forEach((axis, index) => {
+    variants = variants.concat(variants.map((variant) => ({ axes: [...variant.axes, axis], key: `${variant.key}:${index}` })));
+  });
+  return variants.filter((variant) => variant.axes.length > 0);
+}
+
+function getMirroredPointVariants(point, sourceAxes = mirrorState.axes) {
+  const seen = new Set();
+  const out = [];
+  getMirrorTransformVariants(sourceAxes).forEach((variant) => {
+    const transformed = transformPointByAxes(point, variant.axes);
+    const key = `${roundTo(transformed.x, 3)}:${roundTo(transformed.y, 3)}`;
+    if (seen.has(key) || distance(point.x, point.y, transformed.x, transformed.y) <= 0.001) return;
+    seen.add(key);
+    out.push({ ...variant, point: transformed });
+  });
+  return out;
+}
+
+function mirrorSelectionOnce() {
+  if (!mirrorState.axes.length) {
+    setActionState("Draw at least one mirror axis first", "warn", true);
+    return;
+  }
+  const entries = getSelectionEntries();
+  if (!entries.length) {
+    setActionState("Select objects to mirror", "warn", true);
+    return;
+  }
+  const sourceTowerIds = new Set(entries.filter((entry) => entry.type === "tower").map((entry) => entry.item.id));
+  entries.filter((entry) => entry.type === "wall").forEach((entry) => {
+    sourceTowerIds.add(entry.item.t1);
+    sourceTowerIds.add(entry.item.t2);
+  });
+  const sourceTowers = state.towers.filter((tower) => sourceTowerIds.has(tower.id));
+  const sourceWalls = state.walls.filter((wall) => sourceTowerIds.has(wall.t1) && sourceTowerIds.has(wall.t2));
+  const sourceSpawns = entries.filter((entry) => entry.type === "spawn").map((entry) => entry.item);
+  const sourceBombs = entries.filter((entry) => entry.type === "bomb").map((entry) => entry.item);
+  const sourceStructures = entries.filter((entry) => entry.type === "structure").map((entry) => entry.item);
+  const sourceBoundaries = entries.filter((entry) => entry.type === "boundary").map((entry) => entry.item);
+  const variants = getMirrorTransformVariants();
+  const createdKeys = [];
+
+  const changed = withAction("MIRROR_SELECTION", () => {
+    variants.forEach((variant) => {
+      const towerIdMap = new Map();
+      sourceTowers.forEach((tower) => {
+        const point = transformPointByAxes(tower, variant.axes);
+        if (distance(tower.x, tower.y, point.x, point.y) <= 0.001) {
+          towerIdMap.set(tower.id, tower.id);
+          return;
+        }
+        const existing = findPositionMatch(state.towers, point, tower.uid);
+        if (existing) {
+          towerIdMap.set(tower.id, existing.id);
+          return;
+        }
+        const clone = { ...cloneState(tower), uid: createUid("tower"), id: nextTowerId(), x: roundTo(point.x, 3), y: roundTo(point.y, 3) };
+        state.towers.push(clone);
+        towerIdMap.set(tower.id, clone.id);
+        createdKeys.push(makeKey("tower", clone.uid));
+      });
+      sourceWalls.forEach((wall) => {
+        const t1 = towerIdMap.get(wall.t1);
+        const t2 = towerIdMap.get(wall.t2);
+        if (!t1 || !t2 || hasDuplicateWall(t1, t2)) return;
+        const clone = { ...cloneState(wall), uid: createUid("wall"), id: nextWallLocalId(), t1, t2 };
+        state.walls.push(clone);
+        createdKeys.push(makeKey("wall", clone.uid));
+      });
+      sourceSpawns.forEach((spawn) => {
+        const point = transformPointByAxes(spawn, variant.axes);
+        if (distance(spawn.x, spawn.y, point.x, point.y) <= 0.001) return;
+        const teamId = spawn.team_id === 0 ? 1 : spawn.team_id === 1 ? 0 : spawn.team_id;
+        const existing = state.spawn_points.find((item) => item.team_id === teamId);
+        if (existing) {
+          existing.x = roundTo(point.x, 3);
+          existing.y = roundTo(point.y, 3);
+          createdKeys.push(makeKey("spawn", existing.uid));
+          return;
+        }
+        const clone = { ...cloneState(spawn), uid: createUid("spawn"), team_id: teamId, x: roundTo(point.x, 3), y: roundTo(point.y, 3) };
+        state.spawn_points.push(clone);
+        createdKeys.push(makeKey("spawn", clone.uid));
+      });
+      sourceBombs.forEach((bomb) => {
+        const point = transformPointByAxes(bomb, variant.axes);
+        if (distance(bomb.x, bomb.y, point.x, point.y) <= 0.001 || findPositionMatch(state.bomb_sites, point, bomb.uid)) return;
+        const clone = { ...cloneState(bomb), uid: createUid("bomb"), site_letter: nextBombSiteLetter(), x: roundTo(point.x, 3), y: roundTo(point.y, 3) };
+        state.bomb_sites.push(clone);
+        createdKeys.push(makeKey("bomb", clone.uid));
+      });
+      sourceStructures.forEach((structure) => {
+        const point = transformPointByAxes(structure, variant.axes);
+        if (distance(structure.x, structure.y, point.x, point.y) <= 0.001 || findPositionMatch(state.structures, point, structure.uid)) return;
+        const clone = { ...cloneState(structure), uid: createUid("structure"), id: nextStructureId(), x: roundTo(point.x, 3), y: roundTo(point.y, 3) };
+        state.structures.push(clone);
+        createdKeys.push(makeKey("structure", clone.uid));
+      });
+      [...sourceBoundaries].reverse().forEach((boundary) => {
+        const point = transformPointByAxes(boundary, variant.axes);
+        if (distance(boundary.x, boundary.y, point.x, point.y) <= 0.001 || findPositionMatch(state.map_boundaries, point, boundary.uid)) return;
+        const clone = { uid: createUid("boundary"), x: roundTo(point.x, 3), y: roundTo(point.y, 3) };
+        state.map_boundaries.push(clone);
+        createdKeys.push(makeKey("boundary", clone.uid));
+      });
+    });
+    if (!createdKeys.length) return false;
+    selection.clear();
+    createdKeys.forEach((key) => selection.add(key));
+    return true;
+  });
+  if (!changed) {
+    setActionState("Selection lies on the axis or already has mirrored copies", "idle", true);
+    return;
+  }
+  renderSelectionPanel();
+  setActionState(`Created ${createdKeys.length} mirrored item${createdKeys.length === 1 ? "" : "s"}`, "success", true);
+}
+
+function applyLiveMirroring(beforeState) {
+  if (!mirrorState.liveEnabled || mirrorState.applying || !mirrorState.axes.length) return;
+  mirrorState.applying = true;
+  try {
+    const variants = getMirrorTransformVariants();
+    const configs = [
+      { type: "tower", key: "towers" },
+      { type: "spawn", key: "spawn_points" },
+      { type: "bomb", key: "bomb_sites" },
+      { type: "structure", key: "structures" },
+      { type: "boundary", key: "map_boundaries" },
+    ];
+    configs.forEach((config) => {
+      const beforeItems = beforeState[config.key] || [];
+      const currentItems = state[config.key] || [];
+      const beforeByUid = mapItemsByUid(beforeItems);
+      const currentByUid = mapItemsByUid(currentItems);
+      const changedUids = new Set();
+      currentItems.forEach((item) => {
+        const previous = beforeByUid.get(item.uid);
+        if (!previous || JSON.stringify(previous) !== JSON.stringify(item)) changedUids.add(item.uid);
+      });
+      beforeItems.forEach((item) => { if (!currentByUid.has(item.uid)) changedUids.add(item.uid); });
+
+      beforeItems.forEach((previous) => {
+        const current = currentByUid.get(previous.uid);
+        if (current) return;
+        variants.forEach((variant) => {
+          const oldPoint = transformPointByAxes(previous, variant.axes);
+          const counterpart = findPositionMatch(beforeItems, oldPoint, previous.uid);
+          if (counterpart) removeMirroredItem(config.type, counterpart.uid);
+        });
+      });
+
+      currentItems.slice().forEach((current) => {
+        const previous = beforeByUid.get(current.uid);
+        if (!previous) {
+          getMirroredPointVariants(current).forEach((variant) => createMirroredPositionItem(config.type, current, variant.point, config.type === "boundary"));
+          return;
+        }
+        if (JSON.stringify(previous) === JSON.stringify(current)) return;
+        variants.forEach((variant) => {
+          const oldPoint = transformPointByAxes(previous, variant.axes);
+          const newPoint = transformPointByAxes(current, variant.axes);
+          const counterpartBefore = findPositionMatch(beforeItems, oldPoint, previous.uid);
+          if (counterpartBefore && changedUids.has(counterpartBefore.uid)) return;
+          const counterpart = counterpartBefore ? mapItemsByUid(state[config.key]).get(counterpartBefore.uid) : null;
+          if (counterpart) updateMirroredPositionItem(config.type, counterpart, current, newPoint);
+          else createMirroredPositionItem(config.type, current, newPoint, config.type === "boundary");
+        });
+      });
+    });
+    mirrorLiveWalls(beforeState, variants);
+  } finally {
+    mirrorState.applying = false;
+  }
+}
+
+function createMirroredPositionItem(type, source, point, prepend = false) {
+  const keyByType = { tower: "towers", spawn: "spawn_points", bomb: "bomb_sites", structure: "structures", boundary: "map_boundaries" };
+  const list = state[keyByType[type]];
+  if (!list || distance(source.x, source.y, point.x, point.y) <= 0.001 || findPositionMatch(list, point, source.uid)) return null;
+  const clone = { ...cloneState(source), uid: createUid(type), x: roundTo(point.x, 3), y: roundTo(point.y, 3) };
+  if (type === "tower") clone.id = nextTowerId();
+  if (type === "structure") clone.id = nextStructureId();
+  if (type === "spawn" && (source.team_id === 0 || source.team_id === 1)) {
+    clone.team_id = source.team_id === 0 ? 1 : 0;
+    const existing = state.spawn_points.find((item) => item.team_id === clone.team_id);
+    if (existing) {
+      updateMirroredPositionItem(type, existing, source, point);
+      return existing;
+    }
+  }
+  if (type === "bomb") clone.site_letter = nextBombSiteLetter();
+  if (prepend) list.unshift(clone);
+  else list.push(clone);
+  return clone;
+}
+
+function updateMirroredPositionItem(type, target, source, point) {
+  target.x = roundTo(point.x, 3);
+  target.y = roundTo(point.y, 3);
+  if (type === "tower") {
+    target.team_id = source.team_id;
+    target.health = source.health;
+    target.is_invincible = source.is_invincible;
+  } else if (type === "spawn") {
+    target.team_id = source.team_id === 0 ? 1 : source.team_id === 1 ? 0 : source.team_id;
+  } else if (type === "bomb") {
+    // Preserve the mirrored site's own letter while following position edits.
+  } else if (type === "structure") {
+    target.size = source.size;
+    target.label = source.label;
+    target.color = source.color;
+    target.team_id = source.team_id;
+  }
+}
+
+function removeMirroredItem(type, uid) {
+  if (type === "tower") {
+    const tower = state.towers.find((item) => item.uid === uid);
+    if (!tower) return;
+    state.towers = state.towers.filter((item) => item.uid !== uid);
+    state.walls = state.walls.filter((wall) => wall.t1 !== tower.id && wall.t2 !== tower.id);
+    return;
+  }
+  const keyByType = { spawn: "spawn_points", bomb: "bomb_sites", structure: "structures", boundary: "map_boundaries" };
+  const key = keyByType[type];
+  if (key) state[key] = state[key].filter((item) => item.uid !== uid);
+}
+
+function findPositionMatch(items, point, excludeUid = "") {
+  let best = null;
+  items.forEach((item) => {
+    if (!item || item.uid === excludeUid || !Number.isFinite(item.x) || !Number.isFinite(item.y)) return;
+    const delta = distance(item.x, item.y, point.x, point.y);
+    if (delta <= 1 && (!best || delta < best.delta)) best = { item, delta };
+  });
+  return best ? best.item : null;
+}
+
+function mirrorLiveWalls(beforeState, variants) {
+  const beforeWalls = beforeState.walls || [];
+  const beforeByUid = mapItemsByUid(beforeWalls);
+  const currentByUid = mapItemsByUid(state.walls);
+  beforeWalls.forEach((wall) => {
+    if (currentByUid.has(wall.uid)) return;
+    variants.forEach((variant) => {
+      const counterpart = findMirroredWall(beforeState, wall, variant.axes, beforeState);
+      if (counterpart) state.walls = state.walls.filter((item) => item.uid !== counterpart.uid);
+    });
+  });
+  state.walls.slice().forEach((wall) => {
+    const previous = beforeByUid.get(wall.uid);
+    if (!previous) {
+      variants.forEach((variant) => createMirroredWall(wall, variant.axes));
+      return;
+    }
+    if (previous.team_id === wall.team_id) return;
+    variants.forEach((variant) => {
+      const counterpart = findMirroredWall(beforeState, previous, variant.axes, state);
+      if (counterpart) counterpart.team_id = wall.team_id;
+    });
+  });
+}
+
+function findMirroredWall(sourceState, wall, axes, targetState = state) {
+  const a = getTowerByIdFrom(sourceState, wall.t1);
+  const b = getTowerByIdFrom(sourceState, wall.t2);
+  if (!a || !b) return null;
+  const ma = transformPointByAxes(a, axes);
+  const mb = transformPointByAxes(b, axes);
+  const ta = findPositionMatch(targetState.towers, ma);
+  const tb = findPositionMatch(targetState.towers, mb);
+  if (!ta || !tb) return null;
+  return targetState.walls.find((item) => (item.t1 === ta.id && item.t2 === tb.id) || (item.t1 === tb.id && item.t2 === ta.id)) || null;
+}
+
+function createMirroredWall(sourceWall, axes) {
+  const a = getTowerById(sourceWall.t1);
+  const b = getTowerById(sourceWall.t2);
+  if (!a || !b) return null;
+  const ma = transformPointByAxes(a, axes);
+  const mb = transformPointByAxes(b, axes);
+  const ta = findPositionMatch(state.towers, ma);
+  const tb = findPositionMatch(state.towers, mb);
+  if (!ta || !tb || ta.id === tb.id || hasDuplicateWall(ta.id, tb.id)) return null;
+  const clone = { uid: createUid("wall"), id: nextWallLocalId(), t1: ta.id, t2: tb.id, team_id: sourceWall.team_id };
+  state.walls.push(clone);
+  return clone;
+}
+
+function startResize(keysToResize, world) {
+  const startPositions = new Map();
+  const startSizes = new Map();
+  keysToResize.forEach((key) => {
+    const p = getKeyPosition(key);
+    if (p) startPositions.set(key, p);
+    const entry = resolveKey(key);
+    if (entry?.type === "structure") startSizes.set(key, Number(entry.item.size) || 20);
+  });
+  if (!startPositions.size) return;
+  const center = getPositionMapCenter(startPositions);
+  const referenceRadius = Math.max(
+    40,
+    ...Array.from(startPositions.values()).map((point) => distance(point.x, point.y, center.x, center.y)),
+    ...Array.from(startSizes.values()).map((size) => size / 2),
+  );
+  interaction.resize = {
+    keys: Array.from(startPositions.keys()),
+    keySet: new Set(startPositions.keys()),
+    center,
+    startDistance: distance(world.x, world.y, center.x, center.y),
+    referenceRadius,
+    startPositions,
+    startSizes,
+    beforeState: cloneState(state),
+    scale: 1,
+    moved: false,
+    invalidReason: "",
+  };
+  setActionState("Resizing selection", "idle");
+}
+
+function applyResize(world) {
+  const resize = interaction.resize;
+  if (!resize) return;
+  const currentDistance = distance(world.x, world.y, resize.center.x, resize.center.y);
+  let scale = clamp(0.1, 1 + ((currentDistance - resize.startDistance) / resize.referenceRadius), 10);
+  if (editorSettings.gridSnapEnabled && !interaction.snapTemporarilyDisabled) scale = roundTo(scale, 2);
+  const nextPositions = new Map();
+  resize.startPositions.forEach((pos, key) => {
+    nextPositions.set(key, {
+      x: roundTo(resize.center.x + (pos.x - resize.center.x) * scale, 3),
+      y: roundTo(resize.center.y + (pos.y - resize.center.y) * scale, 3),
+    });
+  });
+
+  let invalidReason = "";
+  for (const [key, pos] of nextPositions) {
+    const entry = resolveKey(key);
+    if (!entry || entry.type === "boundary") continue;
+    const item = entry.type === "structure"
+      ? { ...entry.item, size: Math.max(20, Math.round((resize.startSizes.get(key) || entry.item.size) * scale)) }
+      : entry.item;
+    if (!isPlacementInsideBoundary(entry.type, pos.x, pos.y, item)) {
+      invalidReason = "Selection is outside map boundary.";
+      break;
+    }
+  }
+  const movedTowerTargets = getTowerTargetsFromPositionMap(nextPositions);
+  if (!invalidReason && movedTowerTargets.size > 0 && hasTowerOverlapConflict(movedTowerTargets)) invalidReason = "A tower overlaps another tower.";
+  if (!invalidReason && movedTowerTargets.size > 0 && hasTowerOnWallConflict(movedTowerTargets)) invalidReason = "A tower overlaps an existing wall.";
+  if (!invalidReason && movedTowerTargets.size > 0 && findWallOverlap(movedTowerTargets)) invalidReason = "Walls overlap or intersect.";
+
+  nextPositions.forEach((pos, key) => setKeyPosition(key, pos.x, pos.y));
+  resize.startSizes.forEach((size, key) => {
+    const entry = resolveKey(key);
+    if (entry?.type === "structure") entry.item.size = Math.max(20, Math.round(size * scale));
+  });
+  resize.scale = scale;
+  resize.moved = Math.abs(scale - 1) > 0.001;
+  resize.invalidReason = invalidReason;
+  updateLiveSelectionCoordinates();
+  setActionState(invalidReason || `Selection scale: ${roundTo(scale * 100, 1)}%`, invalidReason ? "warn" : "idle");
+}
+
+function finishResize() {
+  const resize = interaction.resize;
+  interaction.resize = null;
+  if (!resize || !resize.moved) return;
+  applyLiveMirroring(resize.beforeState);
+  pushHistory("RESIZE_MULTI", resize.beforeState, cloneState(state));
+  onStateChanged();
+  if (resize.invalidReason) setActionState(`${resize.invalidReason} Export validation may fail.`, "warn");
+  else setActionState(`Selection resized to ${roundTo(resize.scale * 100, 1)}%`, "success", true);
+}
+
 function getSelectionEntries() {
   const out = [];
   selection.forEach((key) => {
@@ -4952,11 +5835,16 @@ function nearlyEqualPoint(a, b) {
 function createInitialState() {
   return {
     spawn_protection_size: 500,
-    map_boundaries: [],
+    map_boundaries: getMapPresetPoints("square", 4000, 4000).map((point) => ({ uid: createUid("boundary"), ...point })),
     spawn_points: [],
     bomb_sites: [],
     towers: [],
     walls: [],
     structures: [],
   };
+}
+
+function ensureDefaultBoundary() {
+  if (state.map_boundaries.length) return;
+  state.map_boundaries = getMapPresetPoints("square", 4000, 4000).map((point) => ({ uid: createUid("boundary"), ...point }));
 }

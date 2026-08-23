@@ -129,6 +129,42 @@ h1 {
   gap: 8px;
 }
 
+.tool-options {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(90, 128, 173, 0.35);
+}
+
+.tool-options h3,
+.settings-section h3 {
+  margin: 0 0 8px;
+  color: #dbe8f7;
+  font-size: 0.9rem;
+}
+
+.compact-note {
+  margin: 2px 0 9px;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.inline-actions,
+.dimension-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.inline-actions .action-button {
+  min-width: 0;
+}
+
+.settings-section {
+  margin: 10px 0;
+  padding-top: 10px;
+  border-top: 1px solid rgba(90, 128, 173, 0.35);
+}
+
 .default-panel {
   margin-top: auto;
 }
@@ -157,6 +193,8 @@ h1 {
   z-index: 8;
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
   pointer-events: auto;
+  max-height: calc(100% - 28px);
+  overflow-y: auto;
 }
 
 .hidden {
@@ -320,6 +358,12 @@ select:focus {
   font-family: "Space Mono", monospace;
   font-size: 0.78rem;
   pointer-events: none;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+  transform: none;
 }
 
 .cursor-coordinates {
