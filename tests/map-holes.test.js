@@ -27,10 +27,10 @@ function createElement(overrides = {}) {
   };
 }
 
-function loadEditor() {
+function loadEditor(canvasContext = {}) {
   const elements = new Map();
   const canvas = createElement({
-    getContext() { return {}; },
+    getContext() { return canvasContext; },
   });
   elements.set("mapCanvas", canvas);
   const document = {
@@ -251,4 +251,19 @@ test("a wall may span a hole, and holes do not affect boundary framing", () => {
   const legacyView = editor.fitView(1200, 800);
   assert.deepEqual(withHoleView, legacyView);
   assert.equal(editor.isPlacementAllowed("tower", 2000, 1500), true);
+});
+
+test("hole interiors use the same fog shade and rim as the outer boundary", () => {
+  const fills = [];
+  const strokes = [];
+  const context = {
+    beginPath() {}, moveTo() {}, lineTo() {}, closePath() {}, arc() {},
+    fill() { fills.push(this.fillStyle); },
+    stroke() { strokes.push(this.strokeStyle); },
+  };
+  const editor = loadEditor(context);
+  editor.importState(baseMap({ map_holes: [squareHole] }));
+  editor.renderHoles();
+  assert.equal(fills[0], "rgba(2, 6, 14, 0.62)");
+  assert.equal(strokes[0], "#2E3842");
 });

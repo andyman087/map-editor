@@ -4085,6 +4085,8 @@ function drawHoles() {
       else ctx.lineTo(screen.x, screen.y);
     });
     if (hole.points.length >= 3) ctx.closePath();
+    ctx.fillStyle = COLORS.boundaryFog;
+    if (hole.points.length >= 3) ctx.fill();
     ctx.lineWidth = (selected ? 6 : 4) * view.scale;
     ctx.strokeStyle = invalid ? COLORS.danger : (selected ? "#FFFFFF" : COLORS.holeRim);
     ctx.stroke();
@@ -4515,6 +4517,10 @@ function drawHoleGhost(ghost) {
   if (ghost.closing && points.length >= 3) ctx.closePath();
   ctx.lineWidth = 3 * view.scale;
   ctx.strokeStyle = ghost.invalid ? COLORS.danger : withAlpha(COLORS.guide, 0.9);
+  if (ghost.closing && points.length >= 3) {
+    ctx.fillStyle = COLORS.boundaryFog;
+    ctx.fill();
+  }
   ctx.stroke();
   points.forEach((point, index) => {
     const screen = worldToScreen(point.x, point.y);
@@ -6326,5 +6332,6 @@ if (globalThis.__COSMOWAR_EDITOR_TEST__) {
       fitBoundaryInView();
       return { ...view };
     },
+    renderHoles: drawHoles,
   };
 }
