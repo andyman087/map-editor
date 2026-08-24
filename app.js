@@ -1604,7 +1604,7 @@ function bindUI() {
     setActionState(`0,0 axis lines ${editorSettings.originAxesVisible ? "shown" : "hidden"}`, "success", true);
     requestRender();
   });
-  el.centerMapOriginBtn.addEventListener("click", centerViewOnOrigin);
+  el.centerMapOriginBtn.addEventListener("click", centerMapOnOrigin);
 
   el.mirrorLiveInput.addEventListener("change", () => {
     mirrorState.liveEnabled = el.mirrorLiveInput.checked;
@@ -3666,7 +3666,7 @@ function withAction(type, mutator) {
   const before = cloneState(state);
   const changed = mutator();
   if (!changed) return false;
-  if (type !== "MIRROR_SELECTION" && type !== "APPLY_MAP_PRESET") applyLiveMirroring(before);
+  if (type !== "MIRROR_SELECTION" && type !== "APPLY_MAP_PRESET" && type !== "CENTER_MAP_ON_ORIGIN") applyLiveMirroring(before);
   pushHistory(type, before, cloneState(state));
   onStateChanged();
   return true;
@@ -5293,13 +5293,39 @@ function fitBoundaryInView() {
   requestRender();
 }
 
-function centerViewOnOrigin() {
-  view.offsetX = viewport.width / 2;
-  view.offsetY = viewport.height / 2;
+function centerMapOnOrigin() {
+  if (!state.map_boundaries.length) {
+    setActionState("Add a map boundary before centering the map", "warn", true);
+    return false;
+  }
+  const xs = state.map_boundaries.map((point) => point.x);
+  const ys = state.map_boundaries.map((point) => point.y);
+  const offsetX = -((Math.min(...xs) + Math.max(...xs)) / 2);
+  const offsetY = -((Math.min(...ys) + Math.max(...ys)) / 2);
+  if (Math.abs(offsetX) <= 0.001 && Math.abs(offsetY) <= 0.001) {
+    fitBoundaryInView();
+    saveSession();
+    setActionState("Map is already centered on 0,0", "idle", true);
+    return false;
+  }
+  const changed = withAction("CENTER_MAP_ON_ORIGIN", () => {
+    const translate = (item) => {
+      item.x = roundTo(item.x + offsetX, 3);
+      item.y = roundTo(item.y + offsetY, 3);
+    };
+    state.map_boundaries.forEach(translate);
+    state.map_holes.forEach((hole) => hole.points.forEach(translate));
+    state.spawn_points.forEach(translate);
+    state.bomb_sites.forEach(translate);
+    state.towers.forEach(translate);
+    state.structures.forEach(translate);
+    return true;
+  });
+  fitBoundaryInView();
   restoredViewFromSession = true;
   saveSession();
-  setActionState("View centered on 0,0", "success", true);
-  requestRender();
+  setActionState(`Map centered on 0,0 (shifted ${roundTo(offsetX, 1)}, ${roundTo(offsetY, 1)})`, "success", true);
+  return changed;
 }
 
 function finishMirrorAxis() {
@@ -6727,11 +6753,11 @@ if (globalThis.__COSMOWAR_EDITOR_TEST__) {
       if (persist) saveSession();
       return { ...view };
     },
-    centerViewOnOrigin(width = viewport.width, height = viewport.height) {
+    centerMapOnOrigin(width = viewport.width, height = viewport.height) {
       viewport.width = width;
       viewport.height = height;
-      centerViewOnOrigin();
-      return { ...view };
+      const changed = centerMapOnOrigin();
+      return { changed, view: { ...view }, state: cloneState(state) };
     },
     resizeSelection(handle, world) {
       const keys = getTransformableSelectionKeys();

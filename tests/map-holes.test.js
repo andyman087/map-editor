@@ -349,7 +349,41 @@ test("grid and view settings survive a restored session", () => {
   assert.equal(restored.settings.originAxesVisible, false);
   assert.equal(JSON.stringify(restored.view), JSON.stringify({ scale: 0.7, offsetX: 321, offsetY: 123 }));
 
-  assert.equal(JSON.stringify(editor.centerViewOnOrigin(1000, 600)), JSON.stringify({ scale: 0.7, offsetX: 500, offsetY: 300 }));
+});
+
+test("centering on 0,0 translates the complete authored map and supports undo", () => {
+  const editor = loadEditor();
+  editor.importState({
+    spawn_protection_size: 100,
+    map_boundaries: [
+      { x: 100, y: 200 }, { x: 1100, y: 200 }, { x: 1100, y: 1000 }, { x: 100, y: 1000 },
+    ],
+    map_holes: [[
+      { x: 450, y: 450 }, { x: 550, y: 450 }, { x: 550, y: 550 }, { x: 450, y: 550 },
+    ]],
+    spawn_points: [{ team_id: 0, x: 200, y: 300 }, { team_id: 1, x: 1000, y: 900 }],
+    bomb_sites: [{ site_letter: "A", x: 800, y: 700 }],
+    towers: [{ id: 1, team_id: 0, health: 4, is_invincible: false, x: 300, y: 400 }],
+    walls: [],
+    structures: [{ id: 1, x: 700, y: 500, size: 40, color: "#fff", team_id: -1 }],
+  });
+  const before = editor.getState();
+  const centered = editor.centerMapOnOrigin(1000, 600);
+  const state = centered.state;
+
+  assert.equal(centered.changed, true);
+  assert.deepEqual(state.map_boundaries.map(({ x, y }) => ({ x, y })), [
+    { x: -500, y: -400 }, { x: 500, y: -400 }, { x: 500, y: 400 }, { x: -500, y: 400 },
+  ]);
+  assert.equal(state.map_holes[0].points[0].x, -150);
+  assert.equal(state.map_holes[0].points[0].y, -150);
+  assert.deepEqual(state.spawn_points.map(({ x, y }) => ({ x, y })), [{ x: -400, y: -300 }, { x: 400, y: 300 }]);
+  assert.deepEqual({ x: state.bomb_sites[0].x, y: state.bomb_sites[0].y }, { x: 200, y: 100 });
+  assert.deepEqual({ x: state.towers[0].x, y: state.towers[0].y }, { x: -300, y: -200 });
+  assert.deepEqual({ x: state.structures[0].x, y: state.structures[0].y }, { x: 100, y: -100 });
+
+  editor.undo();
+  assert.equal(JSON.stringify(editor.getState()), JSON.stringify(before));
 });
 
 test("group snapping falls back to the legal pointer position instead of blocking movement", () => {
