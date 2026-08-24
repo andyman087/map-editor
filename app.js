@@ -70,6 +70,9 @@ const el = {
   gridSnapEnabledInput: document.getElementById("gridSnapEnabledInput"),
   gridSizeInput: document.getElementById("gridSizeInput"),
   gridLineWidthInput: document.getElementById("gridLineWidthInput"),
+  gridMajorVisibleInput: document.getElementById("gridMajorVisibleInput"),
+  originAxesVisibleInput: document.getElementById("originAxesVisibleInput"),
+  centerMapOriginBtn: document.getElementById("centerMapOriginBtn"),
   mirrorTransformType: document.getElementById("mirrorTransformType"),
   mirrorLiveInput: document.getElementById("mirrorLiveInput"),
   mirrorStatus: document.getElementById("mirrorStatus"),
@@ -124,6 +127,8 @@ const editorSettings = {
   gridSnapEnabled: true,
   gridSize: 48,
   gridLineWidth: 1,
+  gridMajorVisible: true,
+  originAxesVisible: true,
 };
 
 const mirrorState = {
@@ -133,6 +138,7 @@ const mirrorState = {
 };
 
 const view = { scale: 0.32, offsetX: 130, offsetY: 80 };
+let restoredViewFromSession = false;
 const viewport = { width: 1, height: 1, dpr: 1 };
 
 const interaction = {
@@ -1333,13 +1339,15 @@ function setup() {
   el.gridSnapEnabledInput.checked = editorSettings.gridSnapEnabled;
   el.gridSizeInput.value = String(editorSettings.gridSize);
   el.gridLineWidthInput.value = String(editorSettings.gridLineWidth);
+  el.gridMajorVisibleInput.checked = editorSettings.gridMajorVisible;
+  el.originAxesVisibleInput.checked = editorSettings.originAxesVisible;
   el.mirrorLiveInput.checked = mirrorState.liveEnabled;
   updateMirrorStatus();
   el.towerHealthInput.max = String(GAME.TOWER_MAX_HEALTH);
   el.towerHealthInput.value = String(defaults.towerHealth);
   el.towerInvincibleInput.checked = defaults.towerInvincible;
   resizeCanvas();
-  fitBoundaryInView();
+  if (!restoredViewFromSession) fitBoundaryInView();
   setMode("select");
   renderSelectionPanel();
   if (!updateInvalidObjectWarning()) setActionState("Idle", "idle");
@@ -1584,6 +1592,19 @@ function bindUI() {
     setActionState(`Grid line thickness: ${editorSettings.gridLineWidth}`, "success", true);
     requestRender();
   });
+  el.gridMajorVisibleInput.addEventListener("change", () => {
+    editorSettings.gridMajorVisible = el.gridMajorVisibleInput.checked;
+    saveSession();
+    setActionState(`Every 5th grid line ${editorSettings.gridMajorVisible ? "shown" : "hidden"}`, "success", true);
+    requestRender();
+  });
+  el.originAxesVisibleInput.addEventListener("change", () => {
+    editorSettings.originAxesVisible = el.originAxesVisibleInput.checked;
+    saveSession();
+    setActionState(`0,0 axis lines ${editorSettings.originAxesVisible ? "shown" : "hidden"}`, "success", true);
+    requestRender();
+  });
+  el.centerMapOriginBtn.addEventListener("click", centerViewOnOrigin);
 
   el.mirrorLiveInput.addEventListener("change", () => {
     mirrorState.liveEnabled = el.mirrorLiveInput.checked;
@@ -1620,6 +1641,7 @@ function bindUI() {
 
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   canvas.addEventListener("mousedown", onMouseDown);
+  canvas.addEventListener("dblclick", onDoubleClick);
   window.addEventListener("mousemove", onMouseMove);
   window.addEventListener("mouseup", onMouseUp);
   canvas.addEventListener("wheel", onWheel, { passive: false });
@@ -1716,7 +1738,17 @@ function updateCursor() {
     return;
   }
   if (interaction.mode === "select") {
-    canvas.style.cursor = interaction.drag || interaction.rotate || interaction.resize ? "grabbing" : "default";
+    if (interaction.drag || interaction.rotate || interaction.resize) {
+      canvas.style.cursor = "grabbing";
+      return;
+    }
+    const control = hitSelectionTransformControl(interaction.mouseScreen);
+    if (control?.type === "move") canvas.style.cursor = "move";
+    else if (control?.type === "rotate") canvas.style.cursor = "grab";
+    else if (control?.type === "resize") {
+      const cursors = { n: "ns-resize", s: "ns-resize", e: "ew-resize", w: "ew-resize", ne: "nesw-resize", sw: "nesw-resize", nw: "nwse-resize", se: "nwse-resize" };
+      canvas.style.cursor = cursors[control.handle] || "default";
+    } else canvas.style.cursor = "default";
     return;
   }
   canvas.style.cursor = "crosshair";
@@ -1786,6 +1818,7 @@ function onMouseDown(event) {
 
 function onMouseMove(event) {
   updateMousePosition(event);
+  updateCursor();
   const world = interaction.mouseWorld;
   multiplayerManager?.sendCursorMove(world);
 
@@ -1931,6 +1964,7 @@ function refreshPlacementPreviewFromMouse() {
 }
 
 function onMouseUp() {
+  const viewChanged = interaction.isPanning;
   interaction.isPanning = false;
   interaction.panStartMouse = null;
   interaction.panStartOffset = null;
@@ -1940,6 +1974,7 @@ function onMouseUp() {
   if (interaction.rotate) finishRotate();
   if (interaction.resize) finishResize();
   if (interaction.mirrorDraft) finishMirrorAxis();
+  if (viewChanged) saveSession();
 
   updateCursor();
   requestRender();
@@ -1955,6 +1990,7 @@ function onWheel(event) {
   const after = screenToWorld(interaction.mouseScreen.x, interaction.mouseScreen.y);
   view.offsetX += (after.x - before.x) * view.scale;
   view.offsetY += (after.y - before.y) * view.scale;
+  saveSession();
   requestRender();
 }
 
@@ -2084,6 +2120,15 @@ function worldToScreen(worldX, worldY) {
 }
 
 function handleSelectDown(event, world) {
+  const control = hitSelectionTransformControl(interaction.mouseScreen);
+  if (control) {
+    const transformable = getTransformableSelectionKeys();
+    if (control.type === "rotate") startRotate(transformable, world);
+    else if (control.type === "resize") startResize(transformable, world, control.handle);
+    else if (control.type === "move") startDrag(transformable, transformable[0], world);
+    event.preventDefault();
+    return;
+  }
   const hit = hitTest(world);
   const transformGesture = event.altKey;
   const multiModifier = !transformGesture && (event.shiftKey || event.ctrlKey || event.metaKey);
@@ -2133,6 +2178,39 @@ function handleSelectDown(event, world) {
   startDrag(movable.length > 0 ? movable : [key], key, world);
 }
 
+function onDoubleClick(event) {
+  if (interaction.mode !== "select" || event.button !== 0) return;
+  updateMousePosition(event);
+  const hit = hitTest(interaction.mouseWorld);
+  if (!hit) return;
+  const source = resolveKey(hit.key);
+  if (!source) return;
+  const candidates = source.type === "hole"
+    ? state.map_holes.map((item) => ({ type: "hole", item, key: makeKey("hole", item.uid) }))
+    : getSelectableEntries().filter((entry) => entry.type === source.type);
+  const matching = candidates.filter((entry) => objectsMatchForBatchSelection(source, entry));
+  selection.clear();
+  matching.forEach((entry) => selection.add(entry.key));
+  renderSelectionPanel();
+  setActionState(`Selected ${matching.length} matching ${matching.length === 1 ? "object" : "objects"}`, "success", true);
+  requestRender();
+  event.preventDefault();
+}
+
+function objectsMatchForBatchSelection(source, candidate) {
+  if (source.type !== candidate.type) return false;
+  if (["tower", "spawn", "wall", "structure"].includes(source.type)) {
+    const sourceColour = source.item.team_id ?? source.item.color ?? null;
+    const candidateColour = candidate.item.team_id ?? candidate.item.color ?? null;
+    if (sourceColour !== candidateColour) return false;
+  }
+  if (source.type === "tower") {
+    return Number(source.item.health) === Number(candidate.item.health)
+      && Boolean(source.item.is_invincible) === Boolean(candidate.item.is_invincible);
+  }
+  return true;
+}
+
 function getMovableSelectionKeys() {
   const entries = getSelectionEntries().filter((entry) => entry.movable);
   const selectedHoleUids = new Set(entries.filter((entry) => entry.type === "hole").map((entry) => entry.item.uid));
@@ -2142,10 +2220,16 @@ function getMovableSelectionKeys() {
 }
 
 function getTransformableSelectionKeys() {
-  const keys = new Set(getMovableSelectionKeys().filter((key) => {
-    const type = resolveKey(key)?.type;
-    return type !== "hole" && type !== "holeVertex";
-  }));
+  const keys = new Set();
+  getMovableSelectionKeys().forEach((key) => {
+    const entry = resolveKey(key);
+    if (!entry) return;
+    if (entry.type === "hole") {
+      entry.item.points.forEach((point) => keys.add(makeKey("holeVertex", point.uid)));
+      return;
+    }
+    keys.add(key);
+  });
   getSelectionEntries().forEach((entry) => {
     if (entry.type !== "wall") return;
     const a = getTowerById(entry.item.t1);
@@ -2195,9 +2279,44 @@ function applyDrag(world) {
   const snap = isAnySnappingEnabled() && !interaction.snapTemporarilyDisabled
     ? getSnapResult(targetX, targetY, new Set(drag.keys))
     : { x: targetX, y: targetY, guideX: null, guideY: null, xPoints: [], yPoints: [] };
-  const dx = snap.x - anchorStart.x;
-  const dy = snap.y - anchorStart.y;
+  const candidates = [snap];
+  if (editorSettings.gridSnapEnabled && !interaction.snapTemporarilyDisabled) {
+    const grid = Math.max(4, Number(editorSettings.gridSize) || 48);
+    candidates.push({
+      x: Math.round(targetX / grid) * grid,
+      y: Math.round(targetY / grid) * grid,
+      guideX: null, guideY: null, xPoints: [], yPoints: [],
+    });
+  }
+  candidates.push({ x: targetX, y: targetY, guideX: null, guideY: null, xPoints: [], yPoints: [] });
+  const uniqueCandidates = candidates.filter((candidate, index, list) => list.findIndex((other) => (
+    Math.abs(other.x - candidate.x) < 0.001 && Math.abs(other.y - candidate.y) < 0.001
+  )) === index);
+  let chosen = null;
+  let invalidReason = "";
+  for (const candidate of uniqueCandidates) {
+    const dx = candidate.x - anchorStart.x;
+    const dy = candidate.y - anchorStart.y;
+    const reason = getDragInvalidReason(drag, dx, dy);
+    if (!reason) {
+      chosen = { snap: candidate, dx, dy };
+      break;
+    }
+    invalidReason = reason;
+  }
+  if (!chosen) {
+    setActionState(invalidReason || "Cannot move selection there.", "warn");
+    return;
+  }
+  const { snap: chosenSnap, dx, dy } = chosen;
 
+  drag.startPositions.forEach((pos, key) => setKeyPosition(key, roundTo(pos.x + dx, 3), roundTo(pos.y + dy, 3)));
+  interaction.guides = { x: chosenSnap.guideX, y: chosenSnap.guideY, xPoints: chosenSnap.xPoints, yPoints: chosenSnap.yPoints };
+  drag.moved = Math.hypot(dx, dy) > 0.001;
+  updateLiveSelectionCoordinates();
+}
+
+function getDragInvalidReason(drag, dx, dy) {
   const willExitBoundary = Array.from(drag.startPositions.entries()).some(([key, pos]) => {
     const entry = resolveKey(key);
     if (!entry) return false;
@@ -2213,30 +2332,22 @@ function applyDrag(world) {
   });
 
   if (willExitBoundary) {
-    setActionState("Cannot move objects outside the boundary or into a map hole.", "warn");
-    return;
+    return "Cannot move objects outside the boundary or into a map hole.";
   }
 
   const movedTowerTargets = getMovedTowerTargets(drag, dx, dy);
   if (movedTowerTargets.size > 0) {
     if (hasNewConflict(getTowerOverlapSignatures(movedTowerTargets), drag.initialTowerOverlaps)) {
-      setActionState("A tower cannot overlap another tower.", "warn");
-      return;
+      return "A tower cannot overlap another tower.";
     }
     if (hasNewConflict(getTowerWallConflictSignatures(movedTowerTargets), drag.initialTowerWallConflicts)) {
-      setActionState("A tower cannot overlap an existing wall.", "warn");
-      return;
+      return "A tower cannot overlap an existing wall.";
     }
     if (hasNewConflict(getWallOverlapSignatures(movedTowerTargets), drag.initialWallOverlaps)) {
-      setActionState("Walls cannot overlap or intersect.", "warn");
-      return;
+      return "Walls cannot overlap or intersect.";
     }
   }
-
-  drag.startPositions.forEach((pos, key) => setKeyPosition(key, roundTo(pos.x + dx, 3), roundTo(pos.y + dy, 3)));
-  interaction.guides = { x: snap.guideX, y: snap.guideY, xPoints: snap.xPoints, yPoints: snap.yPoints };
-  drag.moved = Math.hypot(dx, dy) > 0.001;
-  updateLiveSelectionCoordinates();
+  return "";
 }
 
 function getMovedTowerTargets(drag, dx, dy) {
@@ -3666,6 +3777,18 @@ function restoreSavedSession() {
     if (Number.isFinite(saved?.editorSettings?.gridLineWidth)) {
       editorSettings.gridLineWidth = clamp(0.25, Number(saved.editorSettings.gridLineWidth), 8);
     }
+    if (typeof saved?.editorSettings?.gridMajorVisible === "boolean") {
+      editorSettings.gridMajorVisible = saved.editorSettings.gridMajorVisible;
+    }
+    if (typeof saved?.editorSettings?.originAxesVisible === "boolean") {
+      editorSettings.originAxesVisible = saved.editorSettings.originAxesVisible;
+    }
+    if (Number.isFinite(saved?.view?.scale) && Number.isFinite(saved?.view?.offsetX) && Number.isFinite(saved?.view?.offsetY)) {
+      view.scale = clamp(GAME.MIN_ZOOM, Number(saved.view.scale), GAME.MAX_ZOOM);
+      view.offsetX = Number(saved.view.offsetX);
+      view.offsetY = Number(saved.view.offsetY);
+      restoredViewFromSession = true;
+    }
     if (Array.isArray(saved?.mirrorState?.axes)) {
       mirrorState.axes = saved.mirrorState.axes.filter(isUsableMirrorAxis).slice(-8);
     }
@@ -3715,6 +3838,7 @@ function saveSession() {
       editorSettings,
       mirrorState: { axes: mirrorState.axes, liveEnabled: mirrorState.liveEnabled },
       defaults,
+      view,
     }));
   } catch (error) {
     console.warn("Could not save map editor session.", error);
@@ -3968,7 +4092,7 @@ function drawGrid() {
   ctx.lineWidth = Math.max(0.25, Number(editorSettings.gridLineWidth) || 1);
 
   for (let x = xStart; x <= right; x += cell) {
-    if (Math.abs(x % majorCell) < 0.001) continue;
+    if (editorSettings.gridMajorVisible && Math.abs(x % majorCell) < 0.001) continue;
     const sx = worldToScreen(x, 0).x;
     ctx.beginPath();
     ctx.moveTo(sx, 0);
@@ -3977,7 +4101,7 @@ function drawGrid() {
   }
 
   for (let y = yStart; y <= bottom; y += cell) {
-    if (Math.abs(y % majorCell) < 0.001) continue;
+    if (editorSettings.gridMajorVisible && Math.abs(y % majorCell) < 0.001) continue;
     const sy = worldToScreen(0, y).y;
     ctx.beginPath();
     ctx.moveTo(0, sy);
@@ -3985,43 +4109,47 @@ function drawGrid() {
     ctx.stroke();
   }
 
-  const majorXStart = Math.floor(left / majorCell) * majorCell;
-  const majorYStart = Math.floor(top / majorCell) * majorCell;
-  ctx.strokeStyle = COLORS.gridMajor;
-  ctx.lineWidth = Math.max(0.25, Number(editorSettings.gridLineWidth) || 1) * 1.5;
+  if (editorSettings.gridMajorVisible) {
+    const majorXStart = Math.floor(left / majorCell) * majorCell;
+    const majorYStart = Math.floor(top / majorCell) * majorCell;
+    ctx.strokeStyle = COLORS.gridMajor;
+    ctx.lineWidth = Math.max(0.25, Number(editorSettings.gridLineWidth) || 1) * 1.5;
 
-  for (let x = majorXStart; x <= right; x += majorCell) {
-    const sx = worldToScreen(x, 0).x;
-    ctx.beginPath();
-    ctx.moveTo(sx, 0);
-    ctx.lineTo(sx, viewport.height);
-    ctx.stroke();
-  }
+    for (let x = majorXStart; x <= right; x += majorCell) {
+      const sx = worldToScreen(x, 0).x;
+      ctx.beginPath();
+      ctx.moveTo(sx, 0);
+      ctx.lineTo(sx, viewport.height);
+      ctx.stroke();
+    }
 
-  for (let y = majorYStart; y <= bottom; y += majorCell) {
-    const sy = worldToScreen(0, y).y;
-    ctx.beginPath();
-    ctx.moveTo(0, sy);
-    ctx.lineTo(viewport.width, sy);
-    ctx.stroke();
+    for (let y = majorYStart; y <= bottom; y += majorCell) {
+      const sy = worldToScreen(0, y).y;
+      ctx.beginPath();
+      ctx.moveTo(0, sy);
+      ctx.lineTo(viewport.width, sy);
+      ctx.stroke();
+    }
   }
 
   // Emphasize the world axes so the map's horizontal and vertical halves are easy to read.
-  ctx.strokeStyle = "#7C95AA";
-  ctx.lineWidth = Math.max(0.25, Number(editorSettings.gridLineWidth) || 1) * 2.25;
-  if (left <= 0 && right >= 0) {
-    const sx = worldToScreen(0, 0).x;
-    ctx.beginPath();
-    ctx.moveTo(sx, 0);
-    ctx.lineTo(sx, viewport.height);
-    ctx.stroke();
-  }
-  if (top <= 0 && bottom >= 0) {
-    const sy = worldToScreen(0, 0).y;
-    ctx.beginPath();
-    ctx.moveTo(0, sy);
-    ctx.lineTo(viewport.width, sy);
-    ctx.stroke();
+  if (editorSettings.originAxesVisible) {
+    ctx.strokeStyle = "#7C95AA";
+    ctx.lineWidth = Math.max(0.25, Number(editorSettings.gridLineWidth) || 1) * 2.25;
+    if (left <= 0 && right >= 0) {
+      const sx = worldToScreen(0, 0).x;
+      ctx.beginPath();
+      ctx.moveTo(sx, 0);
+      ctx.lineTo(sx, viewport.height);
+      ctx.stroke();
+    }
+    if (top <= 0 && bottom >= 0) {
+      const sy = worldToScreen(0, 0).y;
+      ctx.beginPath();
+      ctx.moveTo(0, sy);
+      ctx.lineTo(viewport.width, sy);
+      ctx.stroke();
+    }
   }
 }
 
@@ -4900,31 +5028,104 @@ function drawSelectionTransformBounds() {
   if (interaction.mode !== "select" || interaction.drag) return;
   const keys = getTransformableSelectionKeys();
   if (keys.length < 2 && !canResizeSingleSelection(keys)) return;
-  const entries = keys.map(resolveKey).filter(Boolean);
-  if (!entries.length) return;
-  const points = entries.map((entry) => worldToScreen(entry.item.x, entry.item.y));
-  let minX = Math.min(...points.map((point) => point.x));
-  let maxX = Math.max(...points.map((point) => point.x));
-  let minY = Math.min(...points.map((point) => point.y));
-  let maxY = Math.max(...points.map((point) => point.y));
-  entries.forEach((entry, index) => {
-    const padding = entry.type === "structure" ? (entry.item.size / 2) * view.scale : 22 * view.scale;
-    minX = Math.min(minX, points[index].x - padding);
-    maxX = Math.max(maxX, points[index].x + padding);
-    minY = Math.min(minY, points[index].y - padding);
-    maxY = Math.max(maxY, points[index].y + padding);
-  });
+  const bounds = getSelectionTransformBoundsScreen(keys);
+  if (!bounds) return;
+  const { minX, maxX, minY, maxY } = bounds;
+  const handles = getSelectionTransformHandles(bounds);
   ctx.save();
   ctx.setLineDash([7, 5]);
   ctx.lineWidth = 1.5;
   ctx.strokeStyle = interaction.resize ? "rgba(255, 224, 138, 0.95)" : "rgba(116, 200, 255, 0.8)";
   ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
   ctx.setLineDash([]);
-  [[minX, minY], [maxX, minY], [maxX, maxY], [minX, maxY]].forEach(([x, y]) => {
+  Object.entries(handles).forEach(([name, point]) => {
+    if (name === "rotate") return;
     ctx.fillStyle = "#FFE08A";
-    ctx.fillRect(x - 4, y - 4, 8, 8);
+    ctx.strokeStyle = "#0D0F17";
+    ctx.lineWidth = 1;
+    ctx.fillRect(point.x - 5, point.y - 5, 10, 10);
+    ctx.strokeRect(point.x - 5, point.y - 5, 10, 10);
   });
+  const topCenter = handles.n;
+  ctx.strokeStyle = "rgba(116, 200, 255, 0.8)";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(topCenter.x, topCenter.y);
+  ctx.lineTo(handles.rotate.x, handles.rotate.y);
+  ctx.stroke();
+  ctx.fillStyle = "#74C8FF";
+  ctx.beginPath();
+  ctx.arc(handles.rotate.x, handles.rotate.y, 6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#0D0F17";
+  ctx.stroke();
   ctx.restore();
+}
+
+function getSelectionTransformBoundsScreen(keys = getTransformableSelectionKeys()) {
+  const entries = keys.map(resolveKey).filter(Boolean);
+  if (!entries.length) return null;
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  entries.forEach((entry) => {
+    const position = getKeyPosition(entry.key);
+    if (!position) return;
+    const point = worldToScreen(position.x, position.y);
+    const worldPadding = entry.type === "structure"
+      ? (Number(entry.item.size) || 20) / 2
+      : entry.type === "tower" ? GAME.TOWER_DIAMETER / 2 : 22;
+    const padding = ["boundary", "holeVertex"].includes(entry.type) ? 0 : worldPadding * view.scale;
+    minX = Math.min(minX, point.x - padding);
+    maxX = Math.max(maxX, point.x + padding);
+    minY = Math.min(minY, point.y - padding);
+    maxY = Math.max(maxY, point.y + padding);
+  });
+  if (![minX, maxX, minY, maxY].every(Number.isFinite)) return null;
+  if (maxX - minX < 24) {
+    const middle = (minX + maxX) / 2;
+    minX = middle - 12;
+    maxX = middle + 12;
+  }
+  if (maxY - minY < 24) {
+    const middle = (minY + maxY) / 2;
+    minY = middle - 12;
+    maxY = middle + 12;
+  }
+  return { minX, maxX, minY, maxY };
+}
+
+function getSelectionTransformHandles(bounds) {
+  const midX = (bounds.minX + bounds.maxX) / 2;
+  const midY = (bounds.minY + bounds.maxY) / 2;
+  return {
+    nw: { x: bounds.minX, y: bounds.minY }, n: { x: midX, y: bounds.minY }, ne: { x: bounds.maxX, y: bounds.minY },
+    e: { x: bounds.maxX, y: midY }, se: { x: bounds.maxX, y: bounds.maxY }, s: { x: midX, y: bounds.maxY },
+    sw: { x: bounds.minX, y: bounds.maxY }, w: { x: bounds.minX, y: midY }, rotate: { x: midX, y: bounds.minY - 30 },
+  };
+}
+
+function hitSelectionTransformControl(screen) {
+  if (interaction.mode !== "select" || interaction.drag || interaction.rotate || interaction.resize) return null;
+  const keys = getTransformableSelectionKeys();
+  if (keys.length < 2 && !canResizeSingleSelection(keys)) return null;
+  const bounds = getSelectionTransformBoundsScreen(keys);
+  if (!bounds) return null;
+  const handles = getSelectionTransformHandles(bounds);
+  if (distance(screen.x, screen.y, handles.rotate.x, handles.rotate.y) <= 10) return { type: "rotate" };
+  for (const [handle, point] of Object.entries(handles)) {
+    if (handle !== "rotate" && Math.abs(screen.x - point.x) <= 8 && Math.abs(screen.y - point.y) <= 8) {
+      return { type: "resize", handle };
+    }
+  }
+  const withinX = screen.x >= bounds.minX - 6 && screen.x <= bounds.maxX + 6;
+  const withinY = screen.y >= bounds.minY - 6 && screen.y <= bounds.maxY + 6;
+  const nearEdge = withinX && withinY && (
+    Math.abs(screen.x - bounds.minX) <= 6 || Math.abs(screen.x - bounds.maxX) <= 6
+    || Math.abs(screen.y - bounds.minY) <= 6 || Math.abs(screen.y - bounds.maxY) <= 6
+  );
+  return nearEdge ? { type: "move" } : null;
 }
 
 function drawLiveMirrorPreview() {
@@ -5092,6 +5293,15 @@ function fitBoundaryInView() {
   requestRender();
 }
 
+function centerViewOnOrigin() {
+  view.offsetX = viewport.width / 2;
+  view.offsetY = viewport.height / 2;
+  restoredViewFromSession = true;
+  saveSession();
+  setActionState("View centered on 0,0", "success", true);
+  requestRender();
+}
+
 function finishMirrorAxis() {
   const draft = interaction.mirrorDraft;
   interaction.mirrorDraft = null;
@@ -5194,6 +5404,12 @@ function mirrorSelectionOnce() {
   const sourceBombs = entries.filter((entry) => entry.type === "bomb").map((entry) => entry.item);
   const sourceStructures = entries.filter((entry) => entry.type === "structure").map((entry) => entry.item);
   const sourceBoundaries = entries.filter((entry) => entry.type === "boundary").map((entry) => entry.item);
+  const sourceHoleUids = new Set();
+  entries.forEach((entry) => {
+    if (entry.type === "hole") sourceHoleUids.add(entry.item.uid);
+    if (entry.type === "holeVertex") sourceHoleUids.add(entry.hole.uid);
+  });
+  const sourceHoles = state.map_holes.filter((hole) => sourceHoleUids.has(hole.uid));
   const variants = getMirrorTransformVariants();
   const createdKeys = [];
 
@@ -5252,6 +5468,16 @@ function mirrorSelectionOnce() {
         const clone = { ...cloneState(structure), uid: createUid("structure"), id: nextStructureId(), x: roundTo(point.x, 3), y: roundTo(point.y, 3) };
         state.structures.push(clone);
         createdKeys.push(makeKey("structure", clone.uid));
+      });
+      sourceHoles.forEach((hole) => {
+        const points = hole.points.map((point) => transformPointByAxes(point, variant.axes));
+        if (findMatchingHole(state.map_holes, points)) return;
+        const clone = {
+          uid: createUid("hole"),
+          points: points.map((point) => ({ uid: createUid("hole_vertex"), x: roundTo(point.x, 3), y: roundTo(point.y, 3) })),
+        };
+        state.map_holes.push(clone);
+        createdKeys.push(makeKey("hole", clone.uid));
       });
       [...sourceBoundaries].reverse().forEach((boundary) => {
         const point = transformPointByAxes(boundary, variant.axes);
@@ -5326,6 +5552,7 @@ function applyLiveMirroring(beforeState) {
         });
       });
     });
+    mirrorLiveHoles(beforeState, variants);
     mirrorLiveWalls(beforeState, variants);
   } finally {
     mirrorState.applying = false;
@@ -5446,7 +5673,7 @@ function createMirroredWall(sourceWall, axes) {
   return clone;
 }
 
-function startResize(keysToResize, world) {
+function startResize(keysToResize, world, handle = null) {
   const startPositions = new Map();
   const startSizes = new Map();
   keysToResize.forEach((key) => {
@@ -5457,6 +5684,29 @@ function startResize(keysToResize, world) {
   });
   if (!startPositions.size) return;
   const center = getPositionMapCenter(startPositions);
+  const xs = Array.from(startPositions.values()).map((point) => point.x);
+  const ys = Array.from(startPositions.values()).map((point) => point.y);
+  const positionBounds = {
+    minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys),
+  };
+  if (positionBounds.maxX - positionBounds.minX < 0.001) {
+    positionBounds.minX = center.x - 20;
+    positionBounds.maxX = center.x + 20;
+  }
+  if (positionBounds.maxY - positionBounds.minY < 0.001) {
+    positionBounds.minY = center.y - 20;
+    positionBounds.maxY = center.y + 20;
+  }
+  const usesX = Boolean(handle && /[ew]/.test(handle));
+  const usesY = Boolean(handle && /[ns]/.test(handle));
+  const origin = {
+    x: handle?.includes("w") ? positionBounds.maxX : handle?.includes("e") ? positionBounds.minX : center.x,
+    y: handle?.includes("n") ? positionBounds.maxY : handle?.includes("s") ? positionBounds.minY : center.y,
+  };
+  const startHandle = {
+    x: handle?.includes("w") ? positionBounds.minX : handle?.includes("e") ? positionBounds.maxX : center.x,
+    y: handle?.includes("n") ? positionBounds.minY : handle?.includes("s") ? positionBounds.maxY : center.y,
+  };
   const referenceRadius = Math.max(
     40,
     ...Array.from(startPositions.values()).map((point) => distance(point.x, point.y, center.x, center.y)),
@@ -5466,6 +5716,11 @@ function startResize(keysToResize, world) {
     keys: Array.from(startPositions.keys()),
     keySet: new Set(startPositions.keys()),
     center,
+    handle,
+    usesX,
+    usesY,
+    origin,
+    startHandle,
     startDistance: distance(world.x, world.y, center.x, center.y),
     referenceRadius,
     startPositions,
@@ -5481,14 +5736,35 @@ function startResize(keysToResize, world) {
 function applyResize(world) {
   const resize = interaction.resize;
   if (!resize) return;
-  const currentDistance = distance(world.x, world.y, resize.center.x, resize.center.y);
-  let scale = clamp(0.1, 1 + ((currentDistance - resize.startDistance) / resize.referenceRadius), 10);
-  if (editorSettings.gridSnapEnabled && !interaction.snapTemporarilyDisabled) scale = roundTo(scale, 2);
+  let scaleX;
+  let scaleY;
+  if (resize.handle) {
+    let handleX = world.x;
+    let handleY = world.y;
+    if (editorSettings.gridSnapEnabled && !interaction.snapTemporarilyDisabled) {
+      const grid = Math.max(4, Number(editorSettings.gridSize) || 48);
+      if (resize.usesX) handleX = Math.round(handleX / grid) * grid;
+      if (resize.usesY) handleY = Math.round(handleY / grid) * grid;
+    }
+    scaleX = resize.usesX
+      ? clamp(0.1, (handleX - resize.origin.x) / (resize.startHandle.x - resize.origin.x), 10)
+      : 1;
+    scaleY = resize.usesY
+      ? clamp(0.1, (handleY - resize.origin.y) / (resize.startHandle.y - resize.origin.y), 10)
+      : 1;
+  } else {
+    const currentDistance = distance(world.x, world.y, resize.center.x, resize.center.y);
+    let scale = clamp(0.1, 1 + ((currentDistance - resize.startDistance) / resize.referenceRadius), 10);
+    if (editorSettings.gridSnapEnabled && !interaction.snapTemporarilyDisabled) scale = roundTo(scale, 2);
+    scaleX = scale;
+    scaleY = scale;
+  }
+  const sizeScale = Math.sqrt(scaleX * scaleY);
   const nextPositions = new Map();
   resize.startPositions.forEach((pos, key) => {
     nextPositions.set(key, {
-      x: roundTo(resize.center.x + (pos.x - resize.center.x) * scale, 3),
-      y: roundTo(resize.center.y + (pos.y - resize.center.y) * scale, 3),
+      x: roundTo(resize.origin.x + (pos.x - resize.origin.x) * scaleX, 3),
+      y: roundTo(resize.origin.y + (pos.y - resize.origin.y) * scaleY, 3),
     });
   });
 
@@ -5497,7 +5773,7 @@ function applyResize(world) {
     const entry = resolveKey(key);
     if (!entry || entry.type === "boundary") continue;
     const item = entry.type === "structure"
-      ? { ...entry.item, size: Math.max(20, Math.round((resize.startSizes.get(key) || entry.item.size) * scale)) }
+      ? { ...entry.item, size: Math.max(20, Math.round((resize.startSizes.get(key) || entry.item.size) * sizeScale)) }
       : entry.item;
     if (!isPlacementInsideBoundary(entry.type, pos.x, pos.y, item)) {
       invalidReason = "Selection is outside map boundary.";
@@ -5512,13 +5788,15 @@ function applyResize(world) {
   nextPositions.forEach((pos, key) => setKeyPosition(key, pos.x, pos.y));
   resize.startSizes.forEach((size, key) => {
     const entry = resolveKey(key);
-    if (entry?.type === "structure") entry.item.size = Math.max(20, Math.round(size * scale));
+    if (entry?.type === "structure") entry.item.size = Math.max(20, Math.round(size * sizeScale));
   });
-  resize.scale = scale;
-  resize.moved = Math.abs(scale - 1) > 0.001;
+  resize.scale = sizeScale;
+  resize.scaleX = scaleX;
+  resize.scaleY = scaleY;
+  resize.moved = Math.abs(scaleX - 1) > 0.001 || Math.abs(scaleY - 1) > 0.001;
   resize.invalidReason = invalidReason;
   updateLiveSelectionCoordinates();
-  setActionState(invalidReason || `Selection scale: ${roundTo(scale * 100, 1)}%`, invalidReason ? "warn" : "idle");
+  setActionState(invalidReason || `Selection scale: ${roundTo(scaleX * 100, 1)}% x ${roundTo(scaleY * 100, 1)}%`, invalidReason ? "warn" : "idle");
 }
 
 function finishResize() {
@@ -5529,7 +5807,70 @@ function finishResize() {
   pushHistory("RESIZE_MULTI", resize.beforeState, cloneState(state));
   onStateChanged();
   if (resize.invalidReason) setActionState(`${resize.invalidReason} Export validation may fail.`, "warn");
-  else setActionState(`Selection resized to ${roundTo(resize.scale * 100, 1)}%`, "success", true);
+  else setActionState(`Selection resized to ${roundTo((resize.scaleX ?? resize.scale) * 100, 1)}% x ${roundTo((resize.scaleY ?? resize.scale) * 100, 1)}%`, "success", true);
+}
+
+function findMatchingHole(holes, points, excludeUid = null) {
+  return (holes || []).find((hole) => hole.uid !== excludeUid
+    && hole.points.length === points.length
+    && points.every((point) => hole.points.some((candidate) => distance(point.x, point.y, candidate.x, candidate.y) <= 0.01))) || null;
+}
+
+function createMirroredHole(source, axes) {
+  const points = source.points.map((point) => transformPointByAxes(point, axes));
+  if (findMatchingHole(state.map_holes, points)) return null;
+  const clone = {
+    uid: createUid("hole"),
+    points: points.map((point) => ({ uid: createUid("hole_vertex"), x: roundTo(point.x, 3), y: roundTo(point.y, 3) })),
+  };
+  state.map_holes.push(clone);
+  return clone;
+}
+
+function mirrorLiveHoles(beforeState, variants) {
+  const beforeHoles = beforeState.map_holes || [];
+  const beforeByUid = mapItemsByUid(beforeHoles);
+  const currentByUid = mapItemsByUid(state.map_holes);
+  const changedUids = new Set();
+  state.map_holes.forEach((hole) => {
+    const previous = beforeByUid.get(hole.uid);
+    if (!previous || JSON.stringify(previous) !== JSON.stringify(hole)) changedUids.add(hole.uid);
+  });
+  beforeHoles.forEach((hole) => { if (!currentByUid.has(hole.uid)) changedUids.add(hole.uid); });
+
+  beforeHoles.forEach((previous) => {
+    if (currentByUid.has(previous.uid)) return;
+    variants.forEach((variant) => {
+      const oldPoints = previous.points.map((point) => transformPointByAxes(point, variant.axes));
+      const counterpart = findMatchingHole(beforeHoles, oldPoints, previous.uid);
+      if (counterpart) state.map_holes = state.map_holes.filter((hole) => hole.uid !== counterpart.uid);
+    });
+  });
+
+  state.map_holes.slice().forEach((current) => {
+    const previous = beforeByUid.get(current.uid);
+    if (!previous) {
+      variants.forEach((variant) => createMirroredHole(current, variant.axes));
+      return;
+    }
+    if (JSON.stringify(previous) === JSON.stringify(current)) return;
+    variants.forEach((variant) => {
+      const oldPoints = previous.points.map((point) => transformPointByAxes(point, variant.axes));
+      const newPoints = current.points.map((point) => transformPointByAxes(point, variant.axes));
+      const counterpartBefore = findMatchingHole(beforeHoles, oldPoints, previous.uid);
+      if (counterpartBefore && changedUids.has(counterpartBefore.uid)) return;
+      const counterpart = counterpartBefore ? state.map_holes.find((hole) => hole.uid === counterpartBefore.uid) : null;
+      if (!counterpart) {
+        createMirroredHole(current, variant.axes);
+        return;
+      }
+      counterpart.points = newPoints.map((point, index) => ({
+        uid: counterpart.points[index]?.uid || createUid("hole_vertex"),
+        x: roundTo(point.x, 3),
+        y: roundTo(point.y, 3),
+      }));
+    });
+  });
 }
 
 function getSelectionEntries() {
@@ -6339,6 +6680,66 @@ if (globalThis.__COSMOWAR_EDITOR_TEST__) {
       finishBoxSelection();
       return Array.from(selection);
     },
+    getSelection: () => Array.from(selection),
+    selectKeys(keys) {
+      selection.clear();
+      keys.forEach((key) => { if (resolveKey(key)) selection.add(key); });
+      return Array.from(selection);
+    },
+    selectHoleVertices(holeIndex) {
+      selection.clear();
+      const hole = state.map_holes[holeIndex];
+      hole?.points.forEach((point) => selection.add(makeKey("holeVertex", point.uid)));
+      return Array.from(selection);
+    },
+    setMirror(axes, liveEnabled = false) {
+      mirrorState.axes = cloneState(axes).filter(isUsableMirrorAxis);
+      mirrorState.liveEnabled = Boolean(liveEnabled);
+    },
+    mirrorSelectionOnce() {
+      mirrorSelectionOnce();
+      return cloneState(state);
+    },
+    selectMatching(key) {
+      const source = resolveKey(key);
+      if (!source) return [];
+      const candidates = source.type === "hole"
+        ? state.map_holes.map((item) => ({ type: "hole", item, key: makeKey("hole", item.uid) }))
+        : getSelectableEntries().filter((entry) => entry.type === source.type);
+      selection.clear();
+      candidates.filter((entry) => objectsMatchForBatchSelection(source, entry)).forEach((entry) => selection.add(entry.key));
+      return Array.from(selection);
+    },
+    getSettings: () => cloneState(editorSettings),
+    updateSettings(patch, persist = true) {
+      Object.keys(editorSettings).forEach((key) => {
+        if (Object.hasOwn(patch, key)) editorSettings[key] = patch[key];
+      });
+      if (persist) saveSession();
+      return cloneState(editorSettings);
+    },
+    restoreSession() {
+      restoreSavedSession();
+      return { settings: cloneState(editorSettings), view: { ...view } };
+    },
+    setView(nextView, persist = true) {
+      Object.assign(view, nextView);
+      if (persist) saveSession();
+      return { ...view };
+    },
+    centerViewOnOrigin(width = viewport.width, height = viewport.height) {
+      viewport.width = width;
+      viewport.height = height;
+      centerViewOnOrigin();
+      return { ...view };
+    },
+    resizeSelection(handle, world) {
+      const keys = getTransformableSelectionKeys();
+      startResize(keys, world, handle);
+      applyResize(world);
+      finishResize();
+      return cloneState(state);
+    },
     moveSelection(dx, dy) {
       const keys = getMovableSelectionKeys();
       const primaryKey = keys[0];
@@ -6349,6 +6750,17 @@ if (globalThis.__COSMOWAR_EDITOR_TEST__) {
       applyDrag({ x: start.x + Number(dx), y: start.y + Number(dy) });
       finishDrag();
       interaction.snapTemporarilyDisabled = false;
+      return true;
+    },
+    moveSelectionSnapped(dx, dy) {
+      const keys = getMovableSelectionKeys();
+      const primaryKey = keys[0];
+      const start = getKeyPosition(primaryKey);
+      if (!primaryKey || !start) return false;
+      interaction.snapTemporarilyDisabled = false;
+      startDrag(keys, primaryKey, start);
+      applyDrag({ x: start.x + Number(dx), y: start.y + Number(dy) });
+      finishDrag();
       return true;
     },
     renderHoles: drawHoles,

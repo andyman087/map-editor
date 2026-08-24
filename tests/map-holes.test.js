@@ -304,3 +304,98 @@ test("the bundled showcase arena imports cleanly and keeps mirrored competitive 
   }
   assert.deepEqual(showcase.spawn_points[1], { team_id: 1, x: -showcase.spawn_points[0].x, y: showcase.spawn_points[0].y });
 });
+
+test("hole vertex selections mirror complete hole polygons and live edits update their counterpart", () => {
+  const editor = loadEditor();
+  editor.importState(baseMap({ map_holes: [squareHole] }));
+  editor.setMirror([{ type: "reflect", a: { x: 2000, y: 0 }, b: { x: 2000, y: 3000 } }], true);
+  editor.selectHoleVertices(0);
+  editor.mirrorSelectionOnce();
+
+  let holes = editor.getState().map_holes;
+  assert.equal(holes.length, 2);
+  assert.deepEqual(holes[1].points.map(({ x, y }) => ({ x, y })), [
+    { x: 3000, y: 1000 }, { x: 2600, y: 1000 }, { x: 2600, y: 1400 }, { x: 3000, y: 1400 },
+  ]);
+
+  editor.moveHoleVertex(0, 0, 900, 1000);
+  holes = editor.getState().map_holes;
+  assert.equal(holes[1].points[0].x, 3100);
+  assert.equal(holes[1].points[0].y, 1000);
+});
+
+test("grid and view settings survive a restored session", () => {
+  const editor = loadEditor();
+  editor.importState(baseMap());
+  editor.updateSettings({
+    snapStrength: 73,
+    objectSnapEnabled: false,
+    buildModeSnapEnabled: false,
+    gridSnapEnabled: false,
+    gridSize: 72,
+    gridLineWidth: 2.5,
+    gridMajorVisible: false,
+    originAxesVisible: false,
+  });
+  editor.setView({ scale: 0.7, offsetX: 321, offsetY: 123 });
+  editor.updateSettings({ gridSize: 12, gridMajorVisible: true, originAxesVisible: true }, false);
+  editor.setView({ scale: 1, offsetX: 0, offsetY: 0 }, false);
+
+  const restored = editor.restoreSession();
+  assert.equal(restored.settings.snapStrength, 73);
+  assert.equal(restored.settings.gridSize, 72);
+  assert.equal(restored.settings.gridLineWidth, 2.5);
+  assert.equal(restored.settings.gridMajorVisible, false);
+  assert.equal(restored.settings.originAxesVisible, false);
+  assert.equal(JSON.stringify(restored.view), JSON.stringify({ scale: 0.7, offsetX: 321, offsetY: 123 }));
+
+  assert.equal(JSON.stringify(editor.centerViewOnOrigin(1000, 600)), JSON.stringify({ scale: 0.7, offsetX: 500, offsetY: 300 }));
+});
+
+test("group snapping falls back to the legal pointer position instead of blocking movement", () => {
+  const editor = loadEditor();
+  editor.importState(baseMap({
+    towers: [{ id: 1, team_id: 0, health: 4, is_invincible: false, x: 200, y: 1000 }],
+  }));
+  const tower = editor.getState().towers[0];
+  editor.selectKeys([`tower:${tower.uid}`]);
+  editor.updateSettings({ snapStrength: 50, objectSnapEnabled: true, gridSnapEnabled: false }, false);
+  editor.moveSelectionSnapped(-160, 0);
+  assert.equal(editor.getState().towers[0].x, 40, "invalid snap to x=0 should fall back to the legal raw target");
+});
+
+test("side resize handles scale hole vertex groups horizontally and vertically", () => {
+  const editor = loadEditor();
+  editor.importState(baseMap({ map_holes: [squareHole] }));
+  editor.updateSettings({ gridSnapEnabled: false }, false);
+  editor.selectHoleVertices(0);
+  editor.resizeSelection("e", { x: 1800, y: 1200 });
+  let points = editor.getState().map_holes[0].points;
+  assert.deepEqual(points.map((point) => point.x), [1000, 1800, 1800, 1000]);
+  assert.deepEqual(points.map((point) => point.y), [1000, 1000, 1400, 1400]);
+
+  editor.importState(baseMap({ map_holes: [squareHole] }));
+  editor.updateSettings({ gridSnapEnabled: false }, false);
+  editor.selectHoleVertices(0);
+  editor.resizeSelection("s", { x: 1200, y: 1800 });
+  points = editor.getState().map_holes[0].points;
+  assert.deepEqual(points.map((point) => point.x), [1000, 1400, 1400, 1000]);
+  assert.deepEqual(points.map((point) => point.y), [1000, 1000, 1800, 1800]);
+});
+
+test("matching selection uses exact type, colour, health, and invincibility", () => {
+  const editor = loadEditor();
+  editor.importState(baseMap({
+    towers: [
+      { id: 1, team_id: 0, health: 4, is_invincible: false, x: 500, y: 500 },
+      { id: 2, team_id: 0, health: 4, is_invincible: false, x: 700, y: 500 },
+      { id: 3, team_id: 1, health: 4, is_invincible: false, x: 900, y: 500 },
+      { id: 4, team_id: 0, health: 3, is_invincible: false, x: 1100, y: 500 },
+      { id: 5, team_id: 0, health: 4, is_invincible: true, x: 1300, y: 500 },
+    ],
+  }));
+  const towers = editor.getState().towers;
+  const selected = editor.selectMatching(`tower:${towers[0].uid}`);
+  assert.equal(selected.length, 2);
+  assert.ok(selected.includes(`tower:${towers[1].uid}`));
+});

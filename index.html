@@ -141,6 +141,15 @@
             <span>Grid line thickness</span>
             <input type="number" id="gridLineWidthInput" value="1" step="0.25" min="0.25" max="8">
           </label>
+          <label class="checkbox-field">
+            <input type="checkbox" id="gridMajorVisibleInput" checked>
+            <span>Emphasise every 5th grid line</span>
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" id="originAxesVisibleInput" checked>
+            <span>Show 0,0 axis lines</span>
+          </label>
+          <button id="centerMapOriginBtn" class="action-button secondary" type="button">Center view on 0,0</button>
         </section>
 
         <section class="multiplayer-settings" aria-label="Multiplayer settings">
@@ -178,11 +187,12 @@
           <li>Right click or middle click and drag to pan.</li>
           <li>Use WASD or the arrow keys to move around the map.</li>
           <li>Shift/Ctrl/Cmd + click to multi-select in Select / Move.</li>
+          <li>Double-click an object to select every matching type, colour, and health.</li>
           <li>Draw Hole: click vertices, then click the first vertex to close. Esc cancels.</li>
           <li>Hold Ctrl to temporarily disable object and grid snapping.</li>
           <li>Ctrl+C copies selection; left click places the ghost copy.</li>
-          <li>Alt + drag rotates a selected group.</li>
-          <li>Shift + Alt + drag enlarges or shrinks a selected group.</li>
+          <li>Drag the blue rotation handle to rotate a selected group.</li>
+          <li>Drag a side or corner handle to scale; drag the dotted outline to move.</li>
           <li>Draw one or more mirror axes, then use live mode or mirror a selection once.</li>
           <li>Mouse wheel to zoom at cursor.</li>
         </ul>
