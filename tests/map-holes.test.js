@@ -267,3 +267,22 @@ test("hole interiors use the same fog shade and rim as the outer boundary", () =
   assert.equal(fills[0], "rgba(2, 6, 14, 0.62)");
   assert.equal(strokes[0], "#2E3842");
 });
+
+test("box selection selects hole vertices as a movable group", () => {
+  const editor = loadEditor();
+  editor.importState(baseMap({ map_holes: [squareHole] }));
+  const selected = editor.boxSelect({ x: 900, y: 900 }, { x: 1500, y: 1500 });
+  assert.equal(selected.length, 4);
+  assert.ok(selected.every((key) => key.startsWith("holeVertex:")));
+
+  editor.moveSelection(100, 50);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(editor.getState().map_holes[0].points.map(({ x, y }) => ({ x, y })))),
+    squareHole.map((point) => ({ x: point.x + 100, y: point.y + 50 })),
+  );
+  editor.undo();
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(editor.getState().map_holes[0].points.map(({ x, y }) => ({ x, y })))),
+    squareHole,
+  );
+});

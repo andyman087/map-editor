@@ -5548,7 +5548,9 @@ function getSelectableEntries() {
   state.bomb_sites.forEach((item) => list.push({ type: "bomb", item, key: makeKey("bomb", item.uid), movable: true }));
   state.walls.forEach((item) => list.push({ type: "wall", item, key: makeKey("wall", item.uid), movable: false }));
   state.map_boundaries.forEach((item) => list.push({ type: "boundary", item, key: makeKey("boundary", item.uid), movable: true }));
-  state.map_holes.forEach((item) => list.push({ type: "hole", item, key: makeKey("hole", item.uid), movable: true }));
+  state.map_holes.forEach((hole) => {
+    hole.points.forEach((item) => list.push({ type: "holeVertex", item, hole, key: makeKey("holeVertex", item.uid), movable: true }));
+  });
   state.structures.forEach((item) => list.push({ type: "structure", item, key: makeKey("structure", item.uid), movable: true }));
   return list;
 }
@@ -6331,6 +6333,23 @@ if (globalThis.__COSMOWAR_EDITOR_TEST__) {
       viewport.height = height;
       fitBoundaryInView();
       return { ...view };
+    },
+    boxSelect(start, end) {
+      interaction.boxSelect = { start: { ...start }, end: { ...end }, additive: false, baseSelection: [] };
+      finishBoxSelection();
+      return Array.from(selection);
+    },
+    moveSelection(dx, dy) {
+      const keys = getMovableSelectionKeys();
+      const primaryKey = keys[0];
+      const start = getKeyPosition(primaryKey);
+      if (!primaryKey || !start) return false;
+      interaction.snapTemporarilyDisabled = true;
+      startDrag(keys, primaryKey, start);
+      applyDrag({ x: start.x + Number(dx), y: start.y + Number(dy) });
+      finishDrag();
+      interaction.snapTemporarilyDisabled = false;
+      return true;
     },
     renderHoles: drawHoles,
   };
