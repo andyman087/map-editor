@@ -381,6 +381,38 @@ test("live mirror movement previews the selected wall and suppresses stale count
   assert.deepEqual([committed.walls[1].t1, committed.walls[1].t2], [3, 4]);
 });
 
+test("mirror-axis add, move, and removal participate in undo without entering object selection", () => {
+  const editor = loadEditor();
+  editor.importState(baseMap());
+  const axis = { type: "reflect", a: { x: 1000, y: 0 }, b: { x: 1000, y: 3000 } };
+
+  editor.addMirrorAxis(axis);
+  assert.equal(editor.getMirrorAxes().length, 1);
+  editor.undo();
+  assert.equal(editor.getMirrorAxes().length, 0, "undo should remove a newly added mirror axis");
+  editor.redo();
+  assert.equal(editor.getMirrorAxes().length, 1);
+
+  const selectedBeforeMove = editor.boxSelect({ x: -100, y: -100 }, { x: 4100, y: 3100 });
+  editor.moveMirrorAxis(0, 240, -96);
+  let moved = editor.getMirrorAxes()[0];
+  assert.deepEqual(moved, { type: "reflect", a: { x: 1240, y: -96 }, b: { x: 1240, y: 2904 } });
+  assert.equal(JSON.stringify(editor.getSelection()), JSON.stringify(selectedBeforeMove), "moving an axis must not alter map-object selection");
+  editor.undo();
+  assert.deepEqual(editor.getMirrorAxes()[0], axis, "undo should restore the mirror axis position");
+  editor.redo();
+  moved = editor.getMirrorAxes()[0];
+  assert.equal(moved.a.x, 1240);
+
+  assert.ok(selectedBeforeMove.length > 0);
+  assert.ok(selectedBeforeMove.every((key) => !key.startsWith("mirror")), "mirror axes must remain outside map-object group selection");
+
+  editor.removeLastMirrorAxis();
+  assert.equal(editor.getMirrorAxes().length, 0);
+  editor.undo();
+  assert.equal(editor.getMirrorAxes().length, 1, "undo should restore a removed mirror axis");
+});
+
 test("grid and view settings survive a restored session", () => {
   const editor = loadEditor();
   editor.importState(baseMap());

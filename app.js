@@ -163,6 +163,7 @@ const interaction = {
   wallDraftWarnActive: false,
   snapEnabled: true,
   mirrorDraft: null,
+  mirrorAxisDrag: null,
   holeDraft: null,
   guides: { x: null, y: null, xPoints: [], yPoints: [] },
 };
@@ -1616,18 +1617,11 @@ function bindUI() {
   });
   el.applyMirrorSelectionBtn.addEventListener("click", mirrorSelectionOnce);
   el.removeLastMirrorBtn.addEventListener("click", () => {
-    mirrorState.axes.pop();
-    saveSession();
-    updateMirrorStatus();
-    requestRender();
+    commitMirrorAxesChange("REMOVE_MIRROR_AXIS", () => mirrorState.axes.pop(), "Last mirror axis removed");
   });
   el.clearMirrorAxesBtn.addEventListener("click", () => {
-    mirrorState.axes = [];
     interaction.mirrorDraft = null;
-    saveSession();
-    updateMirrorStatus();
-    setActionState("Mirror axes cleared", "idle", true);
-    requestRender();
+    commitMirrorAxesChange("CLEAR_MIRROR_AXES", () => { mirrorState.axes = []; }, "Mirror axes cleared");
   });
   el.applyMapPresetBtn.addEventListener("click", applySelectedMapPreset);
 
@@ -1696,6 +1690,7 @@ function resizeCanvas() {
 
 function setMode(mode) {
   if (mode !== "hole") interaction.holeDraft = null;
+  cancelMirrorAxisDrag();
   interaction.mode = mode;
   interaction.drag = null;
   interaction.rotate = null;
@@ -1739,8 +1734,12 @@ function updateCursor() {
     return;
   }
   if (interaction.mode === "select") {
-    if (interaction.drag || interaction.rotate || interaction.resize) {
+    if (interaction.drag || interaction.rotate || interaction.resize || interaction.mirrorAxisDrag) {
       canvas.style.cursor = "grabbing";
+      return;
+    }
+    if (hitMirrorAxisIndex(interaction.mouseScreen) >= 0) {
+      canvas.style.cursor = "move";
       return;
     }
     const control = hitSelectionTransformControl(interaction.mouseScreen);
@@ -1837,6 +1836,11 @@ function onMouseMove(event) {
   }
   if (interaction.pasteDraft) {
     updatePasteDraft(world);
+    requestRender();
+    return;
+  }
+  if (interaction.mirrorAxisDrag) {
+    applyMirrorAxisDrag(world);
     requestRender();
     return;
   }
@@ -1979,6 +1983,7 @@ function onMouseUp() {
   if (interaction.rotate) finishRotate();
   if (interaction.resize) finishResize();
   if (interaction.mirrorDraft) finishMirrorAxis();
+  if (interaction.mirrorAxisDrag) finishMirrorAxisDrag();
   if (viewChanged) saveSession();
 
   updateCursor();
@@ -2038,6 +2043,7 @@ function onKeyDown(event) {
     interaction.rotate = null;
     interaction.resize = null;
     interaction.mirrorDraft = null;
+    cancelMirrorAxisDrag();
     interaction.pasteDraft = null;
     interaction.guides = { x: null, y: null, xPoints: [], yPoints: [] };
     setActionState(cancelledHoleDraft ? "Incomplete hole cancelled" : "Draft actions cancelled", "idle", true);
@@ -2125,6 +2131,12 @@ function worldToScreen(worldX, worldY) {
 }
 
 function handleSelectDown(event, world) {
+  const mirrorAxisIndex = hitMirrorAxisIndex(interaction.mouseScreen);
+  if (mirrorAxisIndex >= 0) {
+    startMirrorAxisDrag(mirrorAxisIndex, world);
+    event.preventDefault();
+    return;
+  }
   const control = hitSelectionTransformControl(interaction.mouseScreen);
   if (control) {
     const transformable = getTransformableSelectionKeys();
@@ -2183,6 +2195,83 @@ function handleSelectDown(event, world) {
     return;
   }
   startDrag(dragKeys, primaryKey, world);
+}
+
+function hitMirrorAxisIndex(screen) {
+  let bestIndex = -1;
+  let bestDistance = 9;
+  mirrorState.axes.forEach((axis, index) => {
+    if (!isUsableMirrorAxis(axis)) return;
+    const a = worldToScreen(axis.a.x, axis.a.y);
+    const b = worldToScreen(axis.b.x, axis.b.y);
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const length = Math.hypot(dx, dy);
+    if (length <= 0.001) return;
+    const lineDistance = Math.abs((screen.x - a.x) * dy - (screen.y - a.y) * dx) / length;
+    if (lineDistance <= bestDistance) {
+      bestDistance = lineDistance;
+      bestIndex = index;
+    }
+  });
+  return bestIndex;
+}
+
+function startMirrorAxisDrag(index, world) {
+  const axis = mirrorState.axes[index];
+  if (!axis) return;
+  interaction.mirrorAxisDrag = {
+    index,
+    startMouse: { ...world },
+    beforeAxis: cloneState(axis),
+    beforeAxes: cloneState(mirrorState.axes),
+    moved: false,
+  };
+  setActionState("Moving mirror axis", "idle");
+  updateCursor();
+}
+
+function applyMirrorAxisDrag(world) {
+  const drag = interaction.mirrorAxisDrag;
+  const axis = drag ? mirrorState.axes[drag.index] : null;
+  if (!drag || !axis) return;
+  let dx = world.x - drag.startMouse.x;
+  let dy = world.y - drag.startMouse.y;
+  if (editorSettings.gridSnapEnabled && !interaction.snapTemporarilyDisabled) {
+    const grid = Math.max(4, Number(editorSettings.gridSize) || 48);
+    dx = Math.round(dx / grid) * grid;
+    dy = Math.round(dy / grid) * grid;
+  }
+  axis.a.x = roundTo(drag.beforeAxis.a.x + dx, 3);
+  axis.a.y = roundTo(drag.beforeAxis.a.y + dy, 3);
+  axis.b.x = roundTo(drag.beforeAxis.b.x + dx, 3);
+  axis.b.y = roundTo(drag.beforeAxis.b.y + dy, 3);
+  drag.moved = Math.hypot(dx, dy) > 0.001;
+  setActionState(`Mirror axis offset: ${roundTo(dx, 1)}, ${roundTo(dy, 1)}`, "idle");
+}
+
+function finishMirrorAxisDrag() {
+  const drag = interaction.mirrorAxisDrag;
+  interaction.mirrorAxisDrag = null;
+  if (!drag?.moved) {
+    updateCursor();
+    return;
+  }
+  pushMirrorAxesHistory("MOVE_MIRROR_AXIS", drag.beforeAxes, cloneState(mirrorState.axes));
+  saveSession();
+  updateMirrorStatus();
+  setActionState("Mirror axis moved", "success", true);
+  updateCursor();
+  requestRender();
+}
+
+function cancelMirrorAxisDrag() {
+  const drag = interaction.mirrorAxisDrag;
+  if (!drag) return;
+  mirrorState.axes = cloneState(drag.beforeAxes);
+  interaction.mirrorAxisDrag = null;
+  updateMirrorStatus();
+  requestRender();
 }
 
 function isKeyRepresentedBySelection(key) {
@@ -3737,12 +3826,34 @@ function withAction(type, mutator) {
   return true;
 }
 
-function pushHistory(type, before, after) {
-  const entry = { type, before, after };
+function pushHistory(type, before, after, metadata = {}) {
+  const entry = { type, before, after, ...metadata };
   history.undo.push(entry);
   if (history.undo.length > history.limit) history.undo.shift();
   history.redo = [];
-  multiplayerManager?.handleLocalAction(type, before, after, entry);
+  if (!entry.localOnly) multiplayerManager?.handleLocalAction(type, before, after, entry);
+}
+
+function pushMirrorAxesHistory(type, beforeAxes, afterAxes) {
+  const snapshot = cloneState(state);
+  pushHistory(type, snapshot, snapshot, {
+    beforeMirrorAxes: cloneState(beforeAxes),
+    afterMirrorAxes: cloneState(afterAxes),
+    localOnly: true,
+  });
+}
+
+function commitMirrorAxesChange(type, mutator, message) {
+  const beforeAxes = cloneState(mirrorState.axes);
+  mutator();
+  const afterAxes = cloneState(mirrorState.axes);
+  if (JSON.stringify(beforeAxes) === JSON.stringify(afterAxes)) return false;
+  pushMirrorAxesHistory(type, beforeAxes, afterAxes);
+  saveSession();
+  updateMirrorStatus();
+  setActionState(message, "success", true);
+  requestRender();
+  return true;
 }
 
 function isLocalHistoryEntry(action) {
@@ -3758,8 +3869,10 @@ function undoAction() {
   const action = history.undo.pop();
   history.redo.push(action);
   state = applyStateDelta(state, action.after, action.before);
+  if (Array.isArray(action.beforeMirrorAxes)) mirrorState.axes = cloneState(action.beforeMirrorAxes);
   onStateReplaced();
-  multiplayerManager?.handleLocalAction("UNDO", before, cloneState(state));
+  updateMirrorStatus();
+  if (!action.localOnly) multiplayerManager?.handleLocalAction("UNDO", before, cloneState(state));
   setActionState(`Undo: ${action.type}`, "success", true);
 }
 
@@ -3772,8 +3885,10 @@ function redoAction() {
   const action = history.redo.pop();
   history.undo.push(action);
   state = applyStateDelta(state, action.before, action.after);
+  if (Array.isArray(action.afterMirrorAxes)) mirrorState.axes = cloneState(action.afterMirrorAxes);
   onStateReplaced();
-  multiplayerManager?.handleLocalAction("REDO", before, cloneState(state));
+  updateMirrorStatus();
+  if (!action.localOnly) multiplayerManager?.handleLocalAction("REDO", before, cloneState(state));
   setActionState(`Redo: ${action.type}`, "success", true);
 }
 
@@ -3802,6 +3917,7 @@ function onStateReplaced() {
   interaction.resize = null;
   interaction.boxSelect = null;
   interaction.mirrorDraft = null;
+  interaction.mirrorAxisDrag = null;
   interaction.holeDraft = null;
   interaction.guides = { x: null, y: null, xPoints: [], yPoints: [] };
   hydrateCountersFromState();
@@ -5068,6 +5184,7 @@ function drawMirrorAxes() {
   if (interaction.mirrorDraft) axes.push({ type: interaction.mirrorDraft.type, a: interaction.mirrorDraft.start, b: interaction.mirrorDraft.end, draft: true });
   axes.forEach((axis, index) => {
     if (!isUsableMirrorAxis(axis)) return;
+    const dragging = interaction.mirrorAxisDrag?.index === index && !axis.draft;
     const a = worldToScreen(axis.a.x, axis.a.y);
     const b = worldToScreen(axis.b.x, axis.b.y);
     const dx = b.x - a.x;
@@ -5078,8 +5195,8 @@ function drawMirrorAxes() {
     const extension = Math.hypot(viewport.width, viewport.height) * 2;
     ctx.save();
     ctx.setLineDash(axis.type === "rotate" ? [12, 8] : axis.draft ? [8, 6] : []);
-    ctx.lineWidth = axis.draft ? 2.5 : 1.75;
-    ctx.strokeStyle = axis.type === "rotate" ? "rgba(255, 128, 220, 0.9)" : "rgba(111, 207, 231, 0.88)";
+    ctx.lineWidth = dragging ? 3.25 : axis.draft ? 2.5 : 1.75;
+    ctx.strokeStyle = dragging ? "rgba(255, 255, 255, 0.98)" : axis.type === "rotate" ? "rgba(255, 128, 220, 0.9)" : "rgba(111, 207, 231, 0.88)";
     ctx.beginPath();
     ctx.moveTo(a.x - ux * extension, a.y - uy * extension);
     ctx.lineTo(b.x + ux * extension, b.y + uy * extension);
@@ -5519,12 +5636,14 @@ function finishMirrorAxis() {
     requestRender();
     return;
   }
+  const beforeAxes = cloneState(mirrorState.axes);
   mirrorState.axes.push({
     type: draft.type === "rotate" ? "rotate" : "reflect",
     a: { x: roundTo(draft.start.x, 3), y: roundTo(draft.start.y, 3) },
     b: { x: roundTo(draft.end.x, 3), y: roundTo(draft.end.y, 3) },
   });
   if (mirrorState.axes.length > 8) mirrorState.axes.shift();
+  pushMirrorAxesHistory("ADD_MIRROR_AXIS", beforeAxes, cloneState(mirrorState.axes));
   saveSession();
   updateMirrorStatus();
   setActionState(`${draft.type === "rotate" ? "Rotational centre" : "Mirror axis"} added`, "success", true);
@@ -6904,6 +7023,27 @@ if (globalThis.__COSMOWAR_EDITOR_TEST__) {
     setMirror(axes, liveEnabled = false) {
       mirrorState.axes = cloneState(axes).filter(isUsableMirrorAxis);
       mirrorState.liveEnabled = Boolean(liveEnabled);
+    },
+    getMirrorAxes: () => cloneState(mirrorState.axes),
+    addMirrorAxis(axis) {
+      const beforeAxes = cloneState(mirrorState.axes);
+      mirrorState.axes.push(cloneState(axis));
+      pushMirrorAxesHistory("ADD_MIRROR_AXIS", beforeAxes, cloneState(mirrorState.axes));
+      return cloneState(mirrorState.axes);
+    },
+    removeLastMirrorAxis() {
+      commitMirrorAxesChange("REMOVE_MIRROR_AXIS", () => mirrorState.axes.pop(), "Last mirror axis removed");
+      return cloneState(mirrorState.axes);
+    },
+    moveMirrorAxis(index, dx, dy) {
+      const axis = mirrorState.axes[index];
+      if (!axis) return false;
+      interaction.snapTemporarilyDisabled = true;
+      startMirrorAxisDrag(index, axis.a);
+      applyMirrorAxisDrag({ x: axis.a.x + Number(dx), y: axis.a.y + Number(dy) });
+      finishMirrorAxisDrag();
+      interaction.snapTemporarilyDisabled = false;
+      return true;
     },
     setHoleDraftPreview(points, ghost) {
       interaction.holeDraft = { points: cloneState(points) };
