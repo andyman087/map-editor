@@ -26,8 +26,7 @@ const COLORS = {
   gridMajor: "#526679",
   boundary: "#2E3842",
   boundaryFog: "rgba(2, 6, 14, 0.62)",
-  holeFill: "rgba(2, 5, 11, 0.96)",
-  holeRim: "#8EA8CA",
+  holeRim: "#2E3842",
   blue: "#3D5DFF",
   red: "#FF3D3D",
   neutral: "#667380",
@@ -4086,9 +4085,7 @@ function drawHoles() {
       else ctx.lineTo(screen.x, screen.y);
     });
     if (hole.points.length >= 3) ctx.closePath();
-    ctx.fillStyle = invalid ? withAlpha(COLORS.danger, 0.38) : COLORS.holeFill;
-    if (hole.points.length >= 3) ctx.fill();
-    ctx.lineWidth = (selected ? 6 : 3.5) * view.scale;
+    ctx.lineWidth = (selected ? 6 : 4) * view.scale;
     ctx.strokeStyle = invalid ? COLORS.danger : (selected ? "#FFFFFF" : COLORS.holeRim);
     ctx.stroke();
 
@@ -4098,7 +4095,7 @@ function drawHoles() {
       const pointInvalid = isObjectInvalid("holeVertex", point);
       ctx.beginPath();
       ctx.arc(screen.x, screen.y, pointSelected ? 7 : selected ? 5.5 : 4, 0, Math.PI * 2);
-      ctx.fillStyle = pointInvalid ? COLORS.danger : (pointSelected ? "#FFE08A" : selected ? "#FFFFFF" : COLORS.holeRim);
+      ctx.fillStyle = pointInvalid ? COLORS.danger : (pointSelected ? "#FFE08A" : selected ? "#FFFFFF" : "#AEBAC8");
       ctx.fill();
       if (pointSelected) {
         ctx.lineWidth = 2;
@@ -4519,10 +4516,6 @@ function drawHoleGhost(ghost) {
   ctx.lineWidth = 3 * view.scale;
   ctx.strokeStyle = ghost.invalid ? COLORS.danger : withAlpha(COLORS.guide, 0.9);
   ctx.stroke();
-  if (ghost.closing && points.length >= 3) {
-    ctx.fillStyle = ghost.invalid ? withAlpha(COLORS.danger, 0.25) : "rgba(2, 5, 11, 0.72)";
-    ctx.fill();
-  }
   points.forEach((point, index) => {
     const screen = worldToScreen(point.x, point.y);
     ctx.beginPath();
