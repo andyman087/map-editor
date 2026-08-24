@@ -107,6 +107,7 @@ let editorClipboard = null;
 let multiplayerManager = null;
 let panelResize = null;
 let activeValidationReport = null;
+let activeLiveMirrorPreviewModel = null;
 const keyboardPanKeys = new Set();
 let lastFrameTime = null;
 
@@ -4117,6 +4118,7 @@ function updateInvalidObjectWarning() {
 
 function draw() {
   activeValidationReport = getMapValidationReport();
+  activeLiveMirrorPreviewModel = buildActiveLiveMirrorPreviewModel();
   ctx.fillStyle = COLORS.bg;
   ctx.fillRect(0, 0, viewport.width, viewport.height);
   drawGrid();
@@ -4140,6 +4142,7 @@ function draw() {
   drawWallDraft();
   drawBoxSelection();
   activeValidationReport = null;
+  activeLiveMirrorPreviewModel = null;
 }
 
 function drawGrid() {
@@ -4302,6 +4305,7 @@ function drawHoles() {
 
 function drawStructures() {
   state.structures.forEach((s) => {
+    if (isSuppressedLiveMirrorItem("structure", s.uid)) return;
     const p = worldToScreen(s.x, s.y);
     const size = Math.max(14, s.size * view.scale);
     const half = size / 2;
@@ -4325,6 +4329,7 @@ function drawStructures() {
 
 function drawWalls() {
   state.walls.forEach((wall) => {
+    if (activeLiveMirrorPreviewModel?.suppressedWallUids.has(wall.uid)) return;
     const aTower = getTowerById(wall.t1);
     const bTower = getTowerById(wall.t2);
     if (!aTower || !bTower) return;
@@ -4358,6 +4363,7 @@ function drawWalls() {
 
 function drawSpawns() {
   state.spawn_points.forEach((spawn) => {
+    if (isSuppressedLiveMirrorItem("spawn", spawn.uid)) return;
     const p = worldToScreen(spawn.x, spawn.y);
     const spawnSize = Math.max(1, Number(state.spawn_protection_size) || 500);
     const size = spawnSize * view.scale;
@@ -4388,6 +4394,7 @@ function drawSpawns() {
 
 function drawBombSites() {
   state.bomb_sites.forEach((bomb) => {
+    if (isSuppressedLiveMirrorItem("bomb", bomb.uid)) return;
     const p = worldToScreen(bomb.x, bomb.y);
     const radius = 250 * view.scale;
     const invalid = isObjectInvalid("bomb", bomb) || isActiveRotationInvalidKey(makeKey("bomb", bomb.uid));
@@ -4417,6 +4424,7 @@ function drawBombSites() {
 
 function drawTowers() {
   state.towers.forEach((tower) => {
+    if (isSuppressedLiveMirrorItem("tower", tower.uid)) return;
     const p = worldToScreen(tower.x, tower.y);
     const invalid = isObjectInvalid("tower", tower) || isActiveRotationInvalidKey(makeKey("tower", tower.uid));
     const color = getTeamColor(tower.team_id);
@@ -5197,18 +5205,18 @@ function drawLiveMirrorPreview() {
     ? [...mirrorState.axes, { type: interaction.mirrorDraft.type, a: interaction.mirrorDraft.start, b: interaction.mirrorDraft.end }]
     : mirrorState.axes;
   if (!previewAxes.length) return;
-  const previewEntries = [];
   const activeTransform = interaction.drag || interaction.rotate || interaction.resize;
+  const previewEntries = [];
   if (mirrorState.liveEnabled && activeTransform) {
     const keys = activeTransform.keys || [];
     keys.forEach((key) => {
       const entry = resolveKey(key);
-      if (entry) previewEntries.push({ type: entry.type, item: entry.item });
+      if (entry) previewEntries.push({ type: entry.type, item: entry.item, key: entry.key });
     });
   } else if (interaction.mirrorDraft) {
     getTransformableSelectionKeys().forEach((key) => {
       const entry = resolveKey(key);
-      if (entry) previewEntries.push({ type: entry.type, item: entry.item });
+      if (entry) previewEntries.push({ type: entry.type, item: entry.item, key: entry.key });
     });
   }
   if (mirrorState.liveEnabled && interaction.buildGhost) previewEntries.push({ type: "tower", item: interaction.buildGhost });
@@ -5220,19 +5228,24 @@ function drawLiveMirrorPreview() {
     entities.bombs.forEach((item) => previewEntries.push({ type: "bomb", item }));
     entities.structures.forEach((item) => previewEntries.push({ type: "structure", item }));
   }
-  if (!previewEntries.length) return;
   ctx.save();
   ctx.globalAlpha = 0.48;
+  if (mirrorState.liveEnabled) drawMirroredHoleDraftPreview(previewAxes);
   previewEntries.forEach((entry) => {
-    getMirroredPointVariants(entry.item, previewAxes).forEach((variant) => drawMirrorPreviewEntity(entry.type, entry.item, variant.point));
+    getMirroredPointVariants(entry.item, previewAxes).forEach((variant) => {
+      if (activeLiveMirrorPreviewModel?.previewSkip.has(`${entry.key}|${variant.key}`)) return;
+      drawMirrorPreviewEntity(entry.type, entry.item, variant.point);
+    });
   });
   if (activeTransform) {
-    const keySet = new Set(activeTransform.keys || []);
+    const sourceWallUids = activeLiveMirrorPreviewModel?.sourceWallUids || new Set();
     state.walls.forEach((wall) => {
+      if (!sourceWallUids.has(wall.uid)) return;
       const a = getTowerById(wall.t1);
       const b = getTowerById(wall.t2);
-      if (!a || !b || !keySet.has(makeKey("tower", a.uid)) || !keySet.has(makeKey("tower", b.uid))) return;
+      if (!a || !b) return;
       getMirrorTransformVariants(previewAxes).forEach((variant) => {
+        if (activeLiveMirrorPreviewModel?.wallPreviewSkip.has(`${wall.uid}|${variant.key}`)) return;
         const mirrorA = transformPointByAxes(a, variant.axes);
         const mirrorB = transformPointByAxes(b, variant.axes);
         const ma = worldToScreen(mirrorA.x, mirrorA.y);
@@ -5265,6 +5278,112 @@ function drawLiveMirrorPreview() {
     }
   }
   ctx.restore();
+}
+
+function drawMirroredHoleDraftPreview(previewAxes) {
+  getMirroredHoleDraftPolygons(previewAxes).forEach(({ points, closing, invalid }) => {
+    ctx.beginPath();
+    points.forEach((point, index) => {
+      const screen = worldToScreen(point.x, point.y);
+      if (index === 0) ctx.moveTo(screen.x, screen.y);
+      else ctx.lineTo(screen.x, screen.y);
+    });
+    if (closing && points.length >= 3) ctx.closePath();
+    ctx.lineWidth = 3 * view.scale;
+    ctx.strokeStyle = invalid ? COLORS.danger : withAlpha(COLORS.guide, 0.9);
+    if (closing && points.length >= 3) {
+      ctx.fillStyle = COLORS.boundaryFog;
+      ctx.fill();
+    }
+    ctx.stroke();
+    points.forEach((point, index) => {
+      const screen = worldToScreen(point.x, point.y);
+      ctx.beginPath();
+      ctx.arc(screen.x, screen.y, index === 0 ? 7 : 5, 0, Math.PI * 2);
+      ctx.fillStyle = withAlpha(COLORS.guide, 0.95);
+      ctx.fill();
+    });
+  });
+}
+
+function getMirroredHoleDraftPolygons(previewAxes = mirrorState.axes) {
+  const draftPoints = interaction.holeDraft?.points || [];
+  const ghost = interaction.placementGhost?.type === "hole" ? interaction.placementGhost : null;
+  if (!draftPoints.length && !ghost) return [];
+  const sourcePoints = [...draftPoints];
+  if (ghost && !ghost.closing) sourcePoints.push({ x: ghost.x, y: ghost.y });
+  if (!sourcePoints.length) return [];
+  return getMirrorTransformVariants(previewAxes).map((variant) => ({
+    key: variant.key,
+    points: sourcePoints.map((point) => transformPointByAxes(point, variant.axes)),
+    closing: Boolean(ghost?.closing),
+    invalid: Boolean(ghost?.invalid),
+  }));
+}
+
+function buildActiveLiveMirrorPreviewModel() {
+  const activeTransform = interaction.drag || interaction.rotate || interaction.resize;
+  if (!mirrorState.liveEnabled || !mirrorState.axes.length || !activeTransform?.beforeState) return null;
+  const beforeState = activeTransform.beforeState;
+  const activeKeys = new Set(activeTransform.keys || []);
+  const model = {
+    activeKeys,
+    sourceWallUids: new Set(),
+    suppressedKeys: new Set(),
+    suppressedWallUids: new Set(),
+    previewSkip: new Set(),
+    wallPreviewSkip: new Set(),
+  };
+  const variants = getMirrorTransformVariants();
+  const configs = [
+    { type: "tower", key: "towers" },
+    { type: "spawn", key: "spawn_points" },
+    { type: "bomb", key: "bomb_sites" },
+    { type: "structure", key: "structures" },
+    { type: "boundary", key: "map_boundaries" },
+  ];
+  configs.forEach((config) => {
+    const beforeItems = beforeState[config.key] || [];
+    activeKeys.forEach((activeKey) => {
+      const [type, uid] = String(activeKey).split(":");
+      if (type !== config.type) return;
+      const previous = beforeItems.find((item) => item.uid === uid);
+      if (!previous) return;
+      variants.forEach((variant) => {
+        const oldPoint = transformPointByAxes(previous, variant.axes);
+        const counterpart = findPositionMatch(beforeItems, oldPoint, previous.uid);
+        if (!counterpart) return;
+        const counterpartKey = makeKey(config.type, counterpart.uid);
+        if (activeKeys.has(counterpartKey)) model.previewSkip.add(`${activeKey}|${variant.key}`);
+        else model.suppressedKeys.add(counterpartKey);
+      });
+    });
+  });
+
+  const activeTowerIds = new Set(beforeState.towers
+    .filter((tower) => activeKeys.has(makeKey("tower", tower.uid)))
+    .map((tower) => tower.id));
+  const selectedWallUids = new Set(getSelectionEntries().filter((entry) => entry.type === "wall").map((entry) => entry.item.uid));
+  beforeState.walls.forEach((wall) => {
+    if ((activeTowerIds.has(wall.t1) && activeTowerIds.has(wall.t2)) || selectedWallUids.has(wall.uid)) {
+      model.sourceWallUids.add(wall.uid);
+    }
+  });
+  model.sourceWallUids.forEach((uid) => {
+    const wall = beforeState.walls.find((item) => item.uid === uid);
+    if (!wall) return;
+    variants.forEach((variant) => {
+      const counterpart = findMirroredWall(beforeState, wall, variant.axes, beforeState);
+      if (!counterpart || counterpart.uid === wall.uid) return;
+      if (model.sourceWallUids.has(counterpart.uid)) model.wallPreviewSkip.add(`${uid}|${variant.key}`);
+      else model.suppressedWallUids.add(counterpart.uid);
+    });
+  });
+  return model;
+}
+
+function isSuppressedLiveMirrorItem(type, uid) {
+  return Boolean(activeLiveMirrorPreviewModel?.suppressedKeys.has(makeKey(type, uid)));
 }
 
 function drawMirrorPreviewEntity(type, item, point) {
@@ -6786,6 +6905,11 @@ if (globalThis.__COSMOWAR_EDITOR_TEST__) {
       mirrorState.axes = cloneState(axes).filter(isUsableMirrorAxis);
       mirrorState.liveEnabled = Boolean(liveEnabled);
     },
+    setHoleDraftPreview(points, ghost) {
+      interaction.holeDraft = { points: cloneState(points) };
+      interaction.placementGhost = ghost ? { type: "hole", ...cloneState(ghost) } : null;
+      return cloneState(getMirroredHoleDraftPolygons());
+    },
     mirrorSelectionOnce() {
       mirrorSelectionOnce();
       return cloneState(state);
@@ -6852,6 +6976,30 @@ if (globalThis.__COSMOWAR_EDITOR_TEST__) {
       applyDrag({ x: start.x + Number(dx), y: start.y + Number(dy) });
       finishDrag();
       return true;
+    },
+    beginSelectionMove(dx, dy) {
+      const keys = getMovableSelectionKeys().length ? getMovableSelectionKeys() : getTransformableSelectionKeys();
+      const primaryKey = keys[0];
+      const start = getKeyPosition(primaryKey);
+      if (!primaryKey || !start) return null;
+      interaction.snapTemporarilyDisabled = true;
+      startDrag(keys, primaryKey, start);
+      applyDrag({ x: start.x + Number(dx), y: start.y + Number(dy) });
+      const model = buildActiveLiveMirrorPreviewModel();
+      activeLiveMirrorPreviewModel = model;
+      return model ? {
+        sourceWallUids: Array.from(model.sourceWallUids),
+        suppressedWallUids: Array.from(model.suppressedWallUids),
+        suppressedKeys: Array.from(model.suppressedKeys),
+        previewSkip: Array.from(model.previewSkip),
+        wallPreviewSkip: Array.from(model.wallPreviewSkip),
+      } : null;
+    },
+    finishSelectionMove() {
+      finishDrag();
+      interaction.snapTemporarilyDisabled = false;
+      activeLiveMirrorPreviewModel = null;
+      return cloneState(state);
     },
     renderHoles: drawHoles,
   };

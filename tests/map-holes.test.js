@@ -324,6 +324,63 @@ test("hole vertex selections mirror complete hole polygons and live edits update
   assert.equal(holes[1].points[0].y, 1000);
 });
 
+test("an in-progress hole draft exposes live mirrored vertices and edges before completion", () => {
+  const editor = loadEditor();
+  editor.importState(baseMap());
+  editor.setMirror([{ type: "reflect", a: { x: 0, y: -1000 }, b: { x: 0, y: 1000 } }], true);
+  const previews = editor.setHoleDraftPreview(
+    [{ x: 100, y: 100 }, { x: 200, y: 100 }],
+    { x: 200, y: 200, closing: false, invalid: false },
+  );
+
+  assert.equal(previews.length, 1);
+  assert.deepEqual(previews[0].points.map(({ x, y }) => ({ x, y })), [
+    { x: -100, y: 100 }, { x: -200, y: 100 }, { x: -200, y: 200 },
+  ]);
+  assert.equal(editor.getState().map_holes.length, 0, "the mirrored draft should be visible before either hole is committed");
+});
+
+test("live mirror movement previews the selected wall and suppresses stale counterpart towers and wall", () => {
+  const editor = loadEditor();
+  editor.importState({
+    spawn_protection_size: 100,
+    map_boundaries: [
+      { x: -2000, y: -1500 }, { x: 2000, y: -1500 }, { x: 2000, y: 1500 }, { x: -2000, y: 1500 },
+    ],
+    spawn_points: [{ team_id: 0, x: -1600, y: 0 }, { team_id: 1, x: 1600, y: 0 }],
+    bomb_sites: [],
+    towers: [
+      { id: 1, team_id: 0, health: 4, is_invincible: false, x: -1000, y: -300 },
+      { id: 2, team_id: 0, health: 4, is_invincible: false, x: -1000, y: 300 },
+      { id: 3, team_id: 0, health: 4, is_invincible: false, x: 1000, y: -300 },
+      { id: 4, team_id: 0, health: 4, is_invincible: false, x: 1000, y: 300 },
+    ],
+    walls: [
+      { id: 1, t1: 1, t2: 2, team_id: 0 },
+      { id: 2, t1: 3, t2: 4, team_id: 0 },
+    ],
+  });
+  const initial = editor.getState();
+  editor.setMirror([{ type: "reflect", a: { x: 0, y: -1000 }, b: { x: 0, y: 1000 } }], true);
+  editor.selectKeys([
+    `tower:${initial.towers[0].uid}`,
+    `tower:${initial.towers[1].uid}`,
+    `wall:${initial.walls[0].uid}`,
+  ]);
+  const preview = editor.beginSelectionMove(100, 0);
+
+  assert.ok(preview.sourceWallUids.includes(initial.walls[0].uid), "the wall between the moving towers must be included in the mirror ghost");
+  assert.ok(preview.suppressedWallUids.includes(initial.walls[1].uid), "the old mirrored wall must be hidden during the drag");
+  assert.ok(preview.suppressedKeys.includes(`tower:${initial.towers[2].uid}`));
+  assert.ok(preview.suppressedKeys.includes(`tower:${initial.towers[3].uid}`));
+
+  const committed = editor.finishSelectionMove();
+  assert.equal(committed.towers[2].x, 900);
+  assert.equal(committed.towers[3].x, 900);
+  assert.equal(committed.walls.length, 2);
+  assert.deepEqual([committed.walls[1].t1, committed.walls[1].t2], [3, 4]);
+});
+
 test("grid and view settings survive a restored session", () => {
   const editor = loadEditor();
   editor.importState(baseMap());
