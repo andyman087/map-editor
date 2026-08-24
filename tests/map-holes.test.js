@@ -398,6 +398,37 @@ test("group snapping falls back to the legal pointer position instead of blockin
   assert.equal(editor.getState().towers[0].x, 40, "invalid snap to x=0 should fall back to the legal raw target");
 });
 
+test("a snapped whole-map selection is validated against its moving boundary and holes", () => {
+  const editor = loadEditor();
+  editor.importState(baseMap({
+    map_holes: [squareHole],
+    towers: [
+      { id: 1, team_id: 0, health: 4, is_invincible: false, x: 500, y: 1500 },
+      { id: 2, team_id: 1, health: 4, is_invincible: false, x: 3500, y: 1500 },
+    ],
+    walls: [{ id: 1, t1: 1, t2: 2, team_id: -1 }],
+  }));
+  const selected = editor.boxSelect({ x: -100, y: -100 }, { x: 4100, y: 3100 });
+  assert.ok(selected.length >= 12, "the boundary, hole vertices, entities, towers, and wall should all be selected");
+  editor.updateSettings({ objectSnapEnabled: true, gridSnapEnabled: true, gridSize: 48 }, false);
+  editor.moveSelectionSnapped(480, 480);
+  const moved = editor.getState();
+
+  assert.deepEqual(moved.map_boundaries.map(({ x, y }) => ({ x, y })), [
+    { x: 480, y: 480 }, { x: 4480, y: 480 }, { x: 4480, y: 3480 }, { x: 480, y: 3480 },
+  ]);
+  assert.deepEqual(
+    moved.map_holes[0].points.map(({ x, y }) => ({ x, y })),
+    squareHole.map(({ x, y }) => ({ x: x + 480, y: y + 480 })),
+  );
+  assert.deepEqual(moved.spawn_points.map(({ x, y }) => ({ x, y })), [
+    { x: 780, y: 780 }, { x: 4180, y: 3180 },
+  ]);
+  assert.deepEqual(moved.towers.map(({ x, y }) => ({ x, y })), [
+    { x: 980, y: 1980 }, { x: 3980, y: 1980 },
+  ]);
+});
+
 test("side resize handles scale hole vertex groups horizontally and vertically", () => {
   const editor = loadEditor();
   editor.importState(baseMap({ map_holes: [squareHole] }));

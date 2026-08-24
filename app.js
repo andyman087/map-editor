@@ -1748,7 +1748,11 @@ function updateCursor() {
     else if (control?.type === "resize") {
       const cursors = { n: "ns-resize", s: "ns-resize", e: "ew-resize", w: "ew-resize", ne: "nesw-resize", sw: "nesw-resize", nw: "nwse-resize", se: "nwse-resize" };
       canvas.style.cursor = cursors[control.handle] || "default";
-    } else canvas.style.cursor = "default";
+    } else {
+      const hit = hitTest(interaction.mouseWorld);
+      const selectedHit = hit && isKeyRepresentedBySelection(hit.key);
+      canvas.style.cursor = selectedHit && getTransformableSelectionKeys().length ? "move" : "default";
+    }
     return;
   }
   canvas.style.cursor = "crosshair";
@@ -2155,7 +2159,7 @@ function handleSelectDown(event, world) {
     requestRender();
     return;
   }
-  if (!selection.has(key)) {
+  if (!isKeyRepresentedBySelection(key)) {
     selection.clear();
     selection.add(key);
     renderSelectionPanel();
@@ -2170,12 +2174,22 @@ function handleSelectDown(event, world) {
     startRotate(transformable, world);
     return;
   }
-  if (!hit.movable) {
+  const movable = getMovableSelectionKeys();
+  const dragKeys = movable.length ? movable : transformable;
+  const primaryKey = dragKeys.includes(key) ? key : dragKeys[0];
+  if (!primaryKey) {
     requestRender();
     return;
   }
-  const movable = getMovableSelectionKeys();
-  startDrag(movable.length > 0 ? movable : [key], key, world);
+  startDrag(dragKeys, primaryKey, world);
+}
+
+function isKeyRepresentedBySelection(key) {
+  if (selection.has(key)) return true;
+  const entry = resolveKey(key);
+  return entry?.type === "hole"
+    && entry.item.points.length > 0
+    && entry.item.points.every((point) => selection.has(makeKey("holeVertex", point.uid)));
 }
 
 function onDoubleClick(event) {
@@ -2277,14 +2291,15 @@ function applyDrag(world) {
   const targetX = anchorStart.x + rawDx;
   const targetY = anchorStart.y + rawDy;
   const snap = isAnySnappingEnabled() && !interaction.snapTemporarilyDisabled
-    ? getSnapResult(targetX, targetY, new Set(drag.keys))
+    ? getDragSnapResult(drag, targetX, targetY, rawDx, rawDy)
     : { x: targetX, y: targetY, guideX: null, guideY: null, xPoints: [], yPoints: [] };
   const candidates = [snap];
   if (editorSettings.gridSnapEnabled && !interaction.snapTemporarilyDisabled) {
     const grid = Math.max(4, Number(editorSettings.gridSize) || 48);
+    const isGroup = drag.startPositions.size > 1;
     candidates.push({
-      x: Math.round(targetX / grid) * grid,
-      y: Math.round(targetY / grid) * grid,
+      x: isGroup ? anchorStart.x + Math.round(rawDx / grid) * grid : Math.round(targetX / grid) * grid,
+      y: isGroup ? anchorStart.y + Math.round(rawDy / grid) * grid : Math.round(targetY / grid) * grid,
       guideX: null, guideY: null, xPoints: [], yPoints: [],
     });
   }
@@ -2316,7 +2331,28 @@ function applyDrag(world) {
   updateLiveSelectionCoordinates();
 }
 
+function getDragSnapResult(drag, targetX, targetY, rawDx, rawDy) {
+  if (drag.startPositions.size <= 1) return getSnapResult(targetX, targetY, new Set(drag.keys));
+  const objectSnap = getSnapResult(targetX, targetY, new Set(drag.keys), { grid: false });
+  if (!editorSettings.gridSnapEnabled) return objectSnap;
+  const anchorStart = drag.startPositions.get(drag.primaryKey);
+  const grid = Math.max(4, Number(editorSettings.gridSize) || 48);
+  const gridX = anchorStart.x + Math.round(rawDx / grid) * grid;
+  const gridY = anchorStart.y + Math.round(rawDy / grid) * grid;
+  const useObjectX = objectSnap.guideX != null && Math.abs(objectSnap.x - targetX) <= Math.abs(gridX - targetX);
+  const useObjectY = objectSnap.guideY != null && Math.abs(objectSnap.y - targetY) <= Math.abs(gridY - targetY);
+  return {
+    x: useObjectX ? objectSnap.x : gridX,
+    y: useObjectY ? objectSnap.y : gridY,
+    guideX: useObjectX ? objectSnap.guideX : gridX,
+    guideY: useObjectY ? objectSnap.guideY : gridY,
+    xPoints: useObjectX ? objectSnap.xPoints : [],
+    yPoints: useObjectY ? objectSnap.yPoints : [],
+  };
+}
+
 function getDragInvalidReason(drag, dx, dy) {
+  const projectedMapState = getProjectedDragMapState(drag, dx, dy);
   const willExitBoundary = Array.from(drag.startPositions.entries()).some(([key, pos]) => {
     const entry = resolveKey(key);
     if (!entry) return false;
@@ -2324,11 +2360,10 @@ function getDragInvalidReason(drag, dx, dy) {
     const nx = pos.x + dx;
     const ny = pos.y + dy;
     if (entry.type === "hole") {
-      const center = getHoleCenter(entry.item);
-      const translated = entry.item.points.map((point) => ({ x: point.x + nx - center.x, y: point.y + ny - center.y }));
-      return !HOLE_GEOMETRY.polygonStrictlyInsideBoundary(translated, state.map_boundaries);
+      const projectedHole = projectedMapState.map_holes.find((hole) => hole.uid === entry.item.uid);
+      return !projectedHole || !HOLE_GEOMETRY.polygonStrictlyInsideBoundary(projectedHole.points, projectedMapState.map_boundaries);
     }
-    return !isPlacementInsideBoundary(entry.type, nx, ny, entry.item);
+    return !isPlacementInsideBoundary(entry.type, nx, ny, entry.item, projectedMapState);
   });
 
   if (willExitBoundary) {
@@ -2348,6 +2383,35 @@ function getDragInvalidReason(drag, dx, dy) {
     }
   }
   return "";
+}
+
+function getProjectedDragMapState(drag, dx, dy) {
+  const baseState = drag.beforeState;
+  const targetFor = (key, fallback) => {
+    const start = drag.startPositions.get(key);
+    return start ? { x: roundTo(start.x + dx, 3), y: roundTo(start.y + dy, 3) } : fallback;
+  };
+  const mapBoundaries = baseState.map_boundaries.map((point) => ({
+    ...point,
+    ...targetFor(makeKey("boundary", point.uid), { x: point.x, y: point.y }),
+  }));
+  const mapHoles = baseState.map_holes.map((hole) => {
+    const wholeHoleKey = makeKey("hole", hole.uid);
+    if (drag.startPositions.has(wholeHoleKey)) {
+      return {
+        ...hole,
+        points: hole.points.map((point) => ({ ...point, x: roundTo(point.x + dx, 3), y: roundTo(point.y + dy, 3) })),
+      };
+    }
+    return {
+      ...hole,
+      points: hole.points.map((point) => ({
+        ...point,
+        ...targetFor(makeKey("holeVertex", point.uid), { x: point.x, y: point.y }),
+      })),
+    };
+  });
+  return { ...baseState, map_boundaries: mapBoundaries, map_holes: mapHoles };
 }
 
 function getMovedTowerTargets(drag, dx, dy) {
