@@ -1,0 +1,93 @@
+{
+  "spawn_protection_size": 420,
+  "map_boundaries": [
+    { "x": -3000, "y": -1500 },
+    { "x": -2600, "y": -2100 },
+    { "x": -1200, "y": -2400 },
+    { "x": 1200, "y": -2400 },
+    { "x": 2600, "y": -2100 },
+    { "x": 3000, "y": -1500 },
+    { "x": 3000, "y": 1500 },
+    { "x": 2600, "y": 2100 },
+    { "x": 1200, "y": 2400 },
+    { "x": -1200, "y": 2400 },
+    { "x": -2600, "y": 2100 },
+    { "x": -3000, "y": 1500 }
+  ],
+  "map_holes": [
+    [
+      { "x": -440, "y": -180 },
+      { "x": -220, "y": -340 },
+      { "x": 220, "y": -340 },
+      { "x": 440, "y": -180 },
+      { "x": 440, "y": 180 },
+      { "x": 220, "y": 340 },
+      { "x": -220, "y": 340 },
+      { "x": -440, "y": 180 }
+    ],
+    [
+      { "x": -1740, "y": 0 },
+      { "x": -1500, "y": -200 },
+      { "x": -1260, "y": 0 },
+      { "x": -1500, "y": 200 }
+    ],
+    [
+      { "x": 1260, "y": 0 },
+      { "x": 1500, "y": -200 },
+      { "x": 1740, "y": 0 },
+      { "x": 1500, "y": 200 }
+    ],
+    [
+      { "x": -250, "y": -1120 },
+      { "x": 250, "y": -1120 },
+      { "x": 0, "y": -760 }
+    ],
+    [
+      { "x": -250, "y": 1120 },
+      { "x": 0, "y": 760 },
+      { "x": 250, "y": 1120 }
+    ]
+  ],
+  "spawn_points": [
+    { "team_id": 0, "x": -2500, "y": 0 },
+    { "team_id": 1, "x": 2500, "y": 0 }
+  ],
+  "bomb_sites": [
+    { "site_letter": "A", "x": 0, "y": -1600 },
+    { "site_letter": "B", "x": 0, "y": 1600 }
+  ],
+  "towers": [
+    { "id": 1, "team_id": 0, "x": -2600, "y": -650, "health": 4, "is_invincible": false },
+    { "id": 2, "team_id": 0, "x": -2150, "y": -1000, "health": 4, "is_invincible": false },
+    { "id": 3, "team_id": 0, "x": -1650, "y": -780, "health": 4, "is_invincible": false },
+    { "id": 4, "team_id": 0, "x": -1900, "y": 0, "health": 4, "is_invincible": false },
+    { "id": 5, "team_id": 0, "x": -1100, "y": 0, "health": 4, "is_invincible": false },
+    { "id": 6, "team_id": 0, "x": -1650, "y": 780, "health": 4, "is_invincible": false },
+    { "id": 7, "team_id": 0, "x": -2150, "y": 1000, "health": 4, "is_invincible": false },
+    { "id": 8, "team_id": 0, "x": -2600, "y": 650, "health": 4, "is_invincible": false },
+    { "id": 9, "team_id": 1, "x": 2600, "y": -650, "health": 4, "is_invincible": false },
+    { "id": 10, "team_id": 1, "x": 2150, "y": -1000, "health": 4, "is_invincible": false },
+    { "id": 11, "team_id": 1, "x": 1650, "y": -780, "health": 4, "is_invincible": false },
+    { "id": 12, "team_id": 1, "x": 1900, "y": 0, "health": 4, "is_invincible": false },
+    { "id": 13, "team_id": 1, "x": 1100, "y": 0, "health": 4, "is_invincible": false },
+    { "id": 14, "team_id": 1, "x": 1650, "y": 780, "health": 4, "is_invincible": false },
+    { "id": 15, "team_id": 1, "x": 2150, "y": 1000, "health": 4, "is_invincible": false },
+    { "id": 16, "team_id": 1, "x": 2600, "y": 650, "health": 4, "is_invincible": false }
+  ],
+  "walls": [
+    { "t1": 1, "t2": 2, "team_id": 0 },
+    { "t1": 2, "t2": 3, "team_id": 0 },
+    { "t1": 3, "t2": 4, "team_id": 0 },
+    { "t1": 4, "t2": 5, "team_id": 0 },
+    { "t1": 5, "t2": 6, "team_id": 0 },
+    { "t1": 6, "t2": 7, "team_id": 0 },
+    { "t1": 7, "t2": 8, "team_id": 0 },
+    { "t1": 9, "t2": 10, "team_id": 1 },
+    { "t1": 10, "t2": 11, "team_id": 1 },
+    { "t1": 11, "t2": 12, "team_id": 1 },
+    { "t1": 12, "t2": 13, "team_id": 1 },
+    { "t1": 13, "t2": 14, "team_id": 1 },
+    { "t1": 14, "t2": 15, "team_id": 1 },
+    { "t1": 15, "t2": 16, "team_id": 1 }
+  ]
+}

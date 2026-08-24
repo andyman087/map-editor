@@ -286,3 +286,21 @@ test("box selection selects hole vertices as a movable group", () => {
     squareHole,
   );
 });
+
+test("the bundled showcase arena imports cleanly and keeps mirrored competitive geometry", () => {
+  const editor = loadEditor();
+  const showcase = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "showcase-balanced-arena.json"), "utf8"));
+  editor.importState(showcase);
+  assert.equal(editor.validationMessages().length, 0);
+  assert.equal(showcase.map_boundaries.length, 12);
+  assert.equal(showcase.map_holes.length, 5);
+  assert.equal(showcase.walls.length, 14);
+
+  const towersById = new Map(showcase.towers.map((tower) => [tower.id, tower]));
+  for (let blueId = 1; blueId <= 8; blueId += 1) {
+    const blue = towersById.get(blueId);
+    const red = towersById.get(blueId + 8);
+    assert.deepEqual({ x: red.x, y: red.y }, { x: -blue.x, y: blue.y });
+  }
+  assert.deepEqual(showcase.spawn_points[1], { team_id: 1, x: -showcase.spawn_points[0].x, y: showcase.spawn_points[0].y });
+});
