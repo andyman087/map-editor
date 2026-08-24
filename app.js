@@ -1,6 +1,9 @@
 
 const canvas = document.getElementById("mapCanvas");
 const ctx = canvas.getContext("2d");
+const HOLE_GEOMETRY = globalThis.MapHoleGeometry;
+
+if (!HOLE_GEOMETRY) throw new Error("Map hole geometry helpers failed to load.");
 
 const GAME = {
   SNAP_THRESHOLD: 20,
@@ -23,6 +26,8 @@ const COLORS = {
   gridMajor: "#526679",
   boundary: "#2E3842",
   boundaryFog: "rgba(2, 6, 14, 0.62)",
+  holeFill: "rgba(2, 5, 11, 0.96)",
+  holeRim: "#8EA8CA",
   blue: "#3D5DFF",
   red: "#FF3D3D",
   neutral: "#667380",
@@ -39,6 +44,7 @@ const PANEL_LAYOUT_STORAGE_KEY = "top_down_map_editor_panel_layout_v1";
 const MULTIPLAYER_USERNAME_KEY = "top_down_map_editor_username";
 const MULTIPLAYER_COLLECTIONS = [
   { key: "map_boundaries", type: "boundary", prefix: "boundary" },
+  { key: "map_holes", type: "hole", prefix: "hole" },
   { key: "spawn_points", type: "spawn", prefix: "spawn" },
   { key: "bomb_sites", type: "bomb", prefix: "bomb" },
   { key: "towers", type: "tower", prefix: "tower" },
@@ -151,6 +157,7 @@ const interaction = {
   wallDraftWarnActive: false,
   snapEnabled: true,
   mirrorDraft: null,
+  holeDraft: null,
   guides: { x: null, y: null, xPoints: [], yPoints: [] },
 };
 
@@ -1089,6 +1096,18 @@ class ActionValidator {
       permanentIds.uids[item.uid] = uid;
       candidate.map_boundaries.push({ uid, x: Number(item.x), y: Number(item.y) });
     });
+    createByType("hole").forEach((item) => {
+      const uid = createUid("hole");
+      permanentIds.uids[item.uid] = uid;
+      candidate.map_holes.push({
+        uid,
+        points: (item.points || []).map((point) => ({
+          uid: createUid("hole_vertex"),
+          x: Number(point.x),
+          y: Number(point.y),
+        })),
+      });
+    });
     createByType("spawn").forEach((item) => {
       const uid = createUid("spawn");
       permanentIds.uids[item.uid] = uid;
@@ -1163,6 +1182,16 @@ class ActionValidator {
     if (type === "spawn") return { ...current, team_id: Number(item.team_id), x: Number(item.x), y: Number(item.y) };
     if (type === "bomb") return { ...current, site_letter: String(item.site_letter || "A").toUpperCase(), x: Number(item.x), y: Number(item.y) };
     if (type === "boundary") return { ...current, x: Number(item.x), y: Number(item.y) };
+    if (type === "hole") {
+      return {
+        ...current,
+        points: (item.points || []).map((point, index) => ({
+          uid: point.uid || current.points?.[index]?.uid || createUid("hole_vertex"),
+          x: Number(point.x),
+          y: Number(point.y),
+        })),
+      };
+    }
     if (type === "structure") {
       return {
         ...current,
@@ -1207,6 +1236,8 @@ class ActionValidator {
     if (hasNewConflict(getTowerOverlapSignatures(null, candidate), previousTowerOverlaps)) return "A tower overlaps another tower.";
     if (hasNewConflict(getTowerWallConflictSignatures(null, candidate), previousTowerWallConflicts)) return "A tower overlaps an existing wall.";
     if (hasNewConflict(getWallOverlapSignatures(null, candidate), previousWallOverlaps)) return "Walls overlap or intersect.";
+    const holeIssue = HOLE_GEOMETRY.validateMapHoles(candidate)[0];
+    if (holeIssue) return holeIssue.message;
     return "";
   }
 
@@ -1214,6 +1245,7 @@ class ActionValidator {
     return Boolean(value)
       && typeof value === "object"
       && Array.isArray(value.map_boundaries)
+      && (value.map_holes === undefined || Array.isArray(value.map_holes))
       && Array.isArray(value.spawn_points)
       && Array.isArray(value.bomb_sites)
       && Array.isArray(value.towers)
@@ -1273,6 +1305,7 @@ class RollbackHandler {
     const uidSet = new Set(Object.keys(temporaryIds.uids || {}));
     if (!uidSet.size) return;
     state.map_boundaries = state.map_boundaries.filter((item) => !uidSet.has(item.uid));
+    state.map_holes = state.map_holes.filter((item) => !uidSet.has(item.uid));
     state.spawn_points = state.spawn_points.filter((item) => !uidSet.has(item.uid));
     state.bomb_sites = state.bomb_sites.filter((item) => !uidSet.has(item.uid));
     state.structures = state.structures.filter((item) => !uidSet.has(item.uid));
@@ -1282,9 +1315,11 @@ class RollbackHandler {
   }
 }
 
-restoreSavedSession();
-ensureDefaultBoundary();
-setup();
+if (!globalThis.__COSMOWAR_EDITOR_TEST__) {
+  restoreSavedSession();
+  ensureDefaultBoundary();
+  setup();
+}
 
 function setup() {
   hydrateCountersFromState();
@@ -1346,7 +1381,7 @@ function updateKeyboardPan(timestamp) {
   view.offsetY += (y / magnitude) * movement;
   interaction.mouseWorld = screenToWorld(interaction.mouseScreen.x, interaction.mouseScreen.y);
   updateCursorCoordinates();
-  if (["build", "boundary", "spawn", "bomb"].includes(interaction.mode)) refreshPlacementPreviewFromMouse();
+  if (["build", "boundary", "hole", "spawn", "bomb"].includes(interaction.mode)) refreshPlacementPreviewFromMouse();
   requestRender();
 }
 
@@ -1638,6 +1673,7 @@ function resizeCanvas() {
 }
 
 function setMode(mode) {
+  if (mode !== "hole") interaction.holeDraft = null;
   interaction.mode = mode;
   interaction.drag = null;
   interaction.rotate = null;
@@ -1663,6 +1699,7 @@ function setMode(mode) {
 function toolLabel(mode) {
   if (mode === "select") return "Select / Move";
   if (mode === "boundary") return "Draw Boundary";
+  if (mode === "hole") return "Draw Hole";
   if (mode === "spawn") return "Place Spawn";
   if (mode === "bomb") return "Place Bomb Site";
   if (mode === "build") return "Build";
@@ -1728,6 +1765,10 @@ function onMouseDown(event) {
       return true;
     });
     setActionState("Boundary vertex added", "success", true);
+    return;
+  }
+  if (interaction.mode === "hole") {
+    handleHoleAuthorClick(world);
     return;
   }
   if (interaction.mode === "spawn") {
@@ -1837,6 +1878,12 @@ function onMouseMove(event) {
       yPoints: preview.yPoints,
     };
     requestRender();
+  } else if (interaction.mode === "hole") {
+    interaction.buildGhost = null;
+    const preview = getHolePlacementPreview(world);
+    interaction.placementGhost = { type: "hole", ...preview };
+    interaction.guides = { x: preview.guideX, y: preview.guideY, xPoints: preview.xPoints, yPoints: preview.yPoints };
+    requestRender();
   } else if (!interaction.drag) {
     interaction.buildGhost = null;
     interaction.placementGhost = null;
@@ -1870,6 +1917,11 @@ function refreshPlacementPreviewFromMouse() {
       xPoints: preview.xPoints,
       yPoints: preview.yPoints,
     };
+  } else if (interaction.mode === "hole") {
+    interaction.buildGhost = null;
+    const preview = getHolePlacementPreview(world);
+    interaction.placementGhost = { type: "hole", ...preview };
+    interaction.guides = { x: preview.guideX, y: preview.guideY, xPoints: preview.xPoints, yPoints: preview.yPoints };
   } else if (interaction.mode === "spawn" || interaction.mode === "bomb") {
     const preview = getPlacementSnapPreview(world);
     const type = interaction.mode;
@@ -1911,7 +1963,7 @@ function onKeyDown(event) {
   const key = event.key.toLowerCase();
   const mod = event.ctrlKey || event.metaKey;
   interaction.snapTemporarilyDisabled = event.ctrlKey;
-  if (["build", "boundary", "spawn", "bomb"].includes(interaction.mode)) {
+  if (["build", "boundary", "hole", "spawn", "bomb"].includes(interaction.mode)) {
     refreshPlacementPreviewFromMouse();
     requestRender();
   }
@@ -1935,7 +1987,9 @@ function onKeyDown(event) {
   if (key === "escape") {
     event.preventDefault();
     if (unlinkBuildTower()) return;
+    const cancelledHoleDraft = Boolean(interaction.holeDraft);
     interaction.wallDraft = null;
+    interaction.holeDraft = null;
     interaction.hoverTowerId = null;
     interaction.towerDraftWarnActive = false;
     interaction.wallDraftWarnActive = false;
@@ -1946,7 +2000,7 @@ function onKeyDown(event) {
     interaction.mirrorDraft = null;
     interaction.pasteDraft = null;
     interaction.guides = { x: null, y: null, xPoints: [], yPoints: [] };
-    setActionState("Draft actions cancelled", "idle", true);
+    setActionState(cancelledHoleDraft ? "Incomplete hole cancelled" : "Draft actions cancelled", "idle", true);
     requestRender();
     return;
   }
@@ -1960,6 +2014,20 @@ function onKeyDown(event) {
     startPasteDraft();
     return;
   }
+  if (!mod && key === "enter" && interaction.mode === "hole" && interaction.holeDraft && !isTypingInFormControl()) {
+    event.preventDefault();
+    finishHoleDraft();
+    return;
+  }
+  if (key === "backspace" && interaction.mode === "hole" && interaction.holeDraft && !isTypingInFormControl()) {
+    event.preventDefault();
+    interaction.holeDraft.points.pop();
+    if (!interaction.holeDraft.points.length) interaction.holeDraft = null;
+    refreshPlacementPreviewFromMouse();
+    setActionState(interaction.holeDraft ? "Removed last hole vertex" : "Incomplete hole cancelled", "idle", true);
+    requestRender();
+    return;
+  }
   if ((key === "delete" || key === "backspace") && !isTypingInFormControl()) {
     event.preventDefault();
     deleteSelected();
@@ -1969,7 +2037,7 @@ function onKeyDown(event) {
 function onKeyUp(event) {
   keyboardPanKeys.delete(event.key.toLowerCase());
   interaction.snapTemporarilyDisabled = event.ctrlKey;
-  if (["build", "boundary", "spawn", "bomb"].includes(interaction.mode)) {
+  if (["build", "boundary", "hole", "spawn", "bomb"].includes(interaction.mode)) {
     refreshPlacementPreviewFromMouse();
     requestRender();
   }
@@ -2067,11 +2135,18 @@ function handleSelectDown(event, world) {
 }
 
 function getMovableSelectionKeys() {
-  return getSelectionEntries().filter((entry) => entry.movable).map((entry) => entry.key);
+  const entries = getSelectionEntries().filter((entry) => entry.movable);
+  const selectedHoleUids = new Set(entries.filter((entry) => entry.type === "hole").map((entry) => entry.item.uid));
+  return entries
+    .filter((entry) => entry.type !== "holeVertex" || !selectedHoleUids.has(entry.hole.uid))
+    .map((entry) => entry.key);
 }
 
 function getTransformableSelectionKeys() {
-  const keys = new Set(getMovableSelectionKeys());
+  const keys = new Set(getMovableSelectionKeys().filter((key) => {
+    const type = resolveKey(key)?.type;
+    return type !== "hole" && type !== "holeVertex";
+  }));
   getSelectionEntries().forEach((entry) => {
     if (entry.type !== "wall") return;
     const a = getTowerById(entry.item.t1);
@@ -2130,11 +2205,16 @@ function applyDrag(world) {
     if (entry.type === "boundary") return false;
     const nx = pos.x + dx;
     const ny = pos.y + dy;
+    if (entry.type === "hole") {
+      const center = getHoleCenter(entry.item);
+      const translated = entry.item.points.map((point) => ({ x: point.x + nx - center.x, y: point.y + ny - center.y }));
+      return !HOLE_GEOMETRY.polygonStrictlyInsideBoundary(translated, state.map_boundaries);
+    }
     return !isPlacementInsideBoundary(entry.type, nx, ny, entry.item);
   });
 
   if (willExitBoundary) {
-    setActionState("Cannot move objects outside map boundary.", "warn");
+    setActionState("Cannot move objects outside the boundary or into a map hole.", "warn");
     return;
   }
 
@@ -2375,12 +2455,25 @@ function finishBoxSelection() {
   setActionState(selection.size ? `Selected ${selection.size} item(s)` : "Selection box found no entities", selection.size ? "success" : "idle", true);
 }
 
+function getPlacementRestriction(type, x, y, item = null, mapState = state) {
+  if (!isPlacementInsideOuterBoundary(type, x, y, item, mapState)) return "outside the map boundary";
+  if (type === "tower" || type === "spawn") {
+    const holeIndex = HOLE_GEOMETRY.findContainingHoleIndex({ x, y }, mapState.map_holes);
+    if (holeIndex >= 0) return `inside or on hole ${holeIndex}`;
+  }
+  if (type === "bomb") {
+    const holeIndex = HOLE_GEOMETRY.findCircleOverlappingHoleIndex({ x, y }, 250, mapState.map_holes);
+    if (holeIndex >= 0) return `overlapping hole ${holeIndex}`;
+  }
+  return "";
+}
+
 function placeSpawn(world) {
   const target = interaction.placementGhost && interaction.placementGhost.type === "spawn"
     ? interaction.placementGhost
     : getPlacementSnapPreview(world);
   if (!isPlacementInsideBoundary("spawn", target.x, target.y)) {
-    setActionState("Cannot place spawn outside map boundary.", "warn", true);
+    setActionState(`Cannot place spawn ${getPlacementRestriction("spawn", target.x, target.y)}.`, "warn", true);
     return;
   }
   if (defaults.defaultTeam !== 0 && defaults.defaultTeam !== 1) {
@@ -2411,7 +2504,7 @@ function placeBomb(world) {
     ? interaction.placementGhost
     : getPlacementSnapPreview(world);
   if (!isPlacementInsideBoundary("bomb", target.x, target.y)) {
-    setActionState("Cannot place bomb site outside map boundary.", "warn", true);
+    setActionState(`Cannot place bomb site ${getPlacementRestriction("bomb", target.x, target.y)}.`, "warn", true);
     return;
   }
   withAction("PLACE_BOMB", () => {
@@ -2481,7 +2574,7 @@ function placeTower(world) {
     let y = roundTo(buildTarget.y, 3);
     const teamId = startTower ? startTower.team_id : defaults.defaultTeam;
     if (!isPlacementInsideBoundary("tower", x, y)) {
-      setActionState("Cannot place tower outside map boundary.", "warn", true);
+      setActionState(`Cannot place tower ${getPlacementRestriction("tower", x, y)}.`, "warn", true);
       return false;
     }
     if (hasTowerOverlapAt(x, y)) {
@@ -2647,6 +2740,106 @@ function getBoundaryPlacementPreview(world) {
     xPoints: useObjectX ? candidates.filter((candidate) => Math.abs(candidate.x - x) <= 0.001) : [],
     yPoints: useObjectY ? candidates.filter((candidate) => Math.abs(candidate.y - y) <= 0.001) : [],
   };
+}
+
+function getHolePlacementPreview(world) {
+  const snapped = getPlacementSnapPreview(world);
+  const draftPoints = interaction.holeDraft?.points || [];
+  const first = draftPoints[0];
+  const closeThreshold = 18 / Math.max(view.scale, 0.0001);
+  const closing = Boolean(first && draftPoints.length >= 3 && distance(snapped.x, snapped.y, first.x, first.y) <= closeThreshold);
+  const point = closing ? first : snapped;
+  const invalid = closing
+    ? getHoleDraftValidationIssue(draftPoints)?.message || ""
+    : !isHoleAuthorPointAllowed(point);
+  return { ...snapped, x: point.x, y: point.y, closing, invalid: Boolean(invalid), invalidReason: invalid || "" };
+}
+
+function isHoleAuthorPointAllowed(point) {
+  if (!HOLE_GEOMETRY.pointInPolygon(point, state.map_boundaries, false)) return false;
+  return HOLE_GEOMETRY.findContainingHoleIndex(point, state.map_holes) < 0;
+}
+
+function handleHoleAuthorClick(world) {
+  const preview = interaction.placementGhost?.type === "hole"
+    ? interaction.placementGhost
+    : getHolePlacementPreview(world);
+  if (preview.closing) {
+    finishHoleDraft();
+    return;
+  }
+  if (preview.invalid) {
+    setActionState("Hole vertices must be strictly inside the boundary and outside other holes.", "warn", true);
+    return;
+  }
+  if (!interaction.holeDraft) interaction.holeDraft = { points: [] };
+  if (interaction.holeDraft.points.some((point) => HOLE_GEOMETRY.pointsEqual(point, preview))) {
+    setActionState("Hole vertices must be distinct. Click the first vertex to close after adding at least three.", "warn", true);
+    return;
+  }
+  interaction.holeDraft.points.push({ x: roundTo(preview.x, 3), y: roundTo(preview.y, 3) });
+  setActionState(interaction.holeDraft.points.length < 3
+    ? `Hole vertex ${interaction.holeDraft.points.length} added`
+    : "Hole vertex added. Click the first vertex or press Enter to close.", "success", true);
+  refreshPlacementPreviewFromMouse();
+  requestRender();
+}
+
+function getHoleDraftValidationIssue(points) {
+  const draftHole = {
+    uid: "draft_hole",
+    points: points.map((point, index) => ({ uid: `draft_vertex_${index}`, x: point.x, y: point.y })),
+  };
+  const candidate = { ...state, map_holes: [...state.map_holes, draftHole] };
+  const draftIndex = candidate.map_holes.length - 1;
+  return HOLE_GEOMETRY.validateMapHoles(candidate).find((issue) => issue.holeIndexes.includes(draftIndex)) || null;
+}
+
+function finishHoleDraft() {
+  const points = interaction.holeDraft?.points || [];
+  if (HOLE_GEOMETRY.distinctPointCount(points) < 3) {
+    setActionState("A hole needs at least three distinct vertices before it can be closed.", "warn", true);
+    return false;
+  }
+  const validationIssue = getHoleDraftValidationIssue(points);
+  if (validationIssue) {
+    setActionState(validationIssue.message, "warn");
+    return false;
+  }
+  let createdHole = null;
+  withAction("CREATE_HOLE", () => {
+    createdHole = {
+      uid: createUid("hole"),
+      points: points.map((point) => ({ uid: createUid("hole_vertex"), x: point.x, y: point.y })),
+    };
+    state.map_holes.push(createdHole);
+    selection.clear();
+    selection.add(makeKey("hole", createdHole.uid));
+    interaction.holeDraft = null;
+    interaction.placementGhost = null;
+    return true;
+  });
+  renderSelectionPanel();
+  refreshPlacementPreviewFromMouse();
+  setActionState(`Hole ${state.map_holes.indexOf(createdHole)} created`, "success", true);
+  return true;
+}
+
+function getHoleCenter(hole) {
+  const points = hole?.points || [];
+  if (!points.length) return { x: 0, y: 0 };
+  const total = points.reduce((sum, point) => ({ x: sum.x + point.x, y: sum.y + point.y }), { x: 0, y: 0 });
+  return { x: total.x / points.length, y: total.y / points.length };
+}
+
+function moveHoleTo(hole, x, y) {
+  const center = getHoleCenter(hole);
+  const dx = x - center.x;
+  const dy = y - center.y;
+  hole.points.forEach((point) => {
+    point.x = roundTo(point.x + dx, 3);
+    point.y = roundTo(point.y + dy, 3);
+  });
 }
 
 function copySelectionToClipboard() {
@@ -2922,6 +3115,12 @@ function getGridSnappedPoint(world) {
 function getGuideCandidates(excludeKeys = new Set()) {
   const list = [];
   state.map_boundaries.forEach((p) => { if (!excludeKeys.has(makeKey("boundary", p.uid))) list.push({ x: p.x, y: p.y }); });
+  state.map_holes.forEach((hole) => {
+    if (excludeKeys.has(makeKey("hole", hole.uid))) return;
+    hole.points.forEach((point) => {
+      if (!excludeKeys.has(makeKey("holeVertex", point.uid))) list.push({ x: point.x, y: point.y });
+    });
+  });
   state.walls.forEach((w) => {
     if (excludeKeys.has(makeKey("wall", w.uid))) return;
     const a = getTowerById(w.t1);
@@ -2997,11 +3196,12 @@ function updateLiveSelectionCoordinates() {
   const entries = getSelectionEntries();
   if (entries.length !== 1) return;
   const entry = entries[0];
-  if (!["tower", "spawn", "bomb", "boundary", "structure"].includes(entry.type)) return;
-  const xInput = document.getElementById("selLiveX") || document.getElementById("selTowerX") || document.getElementById("selSpawnX") || document.getElementById("selBombX") || document.getElementById("selBoundaryX") || document.getElementById("selStructureX");
-  const yInput = document.getElementById("selLiveY") || document.getElementById("selTowerY") || document.getElementById("selSpawnY") || document.getElementById("selBombY") || document.getElementById("selBoundaryY") || document.getElementById("selStructureY");
-  if (xInput) xInput.value = String(roundTo(entry.item.x, 3));
-  if (yInput) yInput.value = String(roundTo(entry.item.y, 3));
+  if (!["tower", "spawn", "bomb", "boundary", "structure", "hole", "holeVertex"].includes(entry.type)) return;
+  const position = entry.type === "hole" ? getHoleCenter(entry.item) : entry.item;
+  const xInput = document.getElementById("selLiveX") || document.getElementById("selTowerX") || document.getElementById("selSpawnX") || document.getElementById("selBombX") || document.getElementById("selBoundaryX") || document.getElementById("selStructureX") || document.getElementById("selHoleX") || document.getElementById("selHoleVertexX");
+  const yInput = document.getElementById("selLiveY") || document.getElementById("selTowerY") || document.getElementById("selSpawnY") || document.getElementById("selBombY") || document.getElementById("selBoundaryY") || document.getElementById("selStructureY") || document.getElementById("selHoleY") || document.getElementById("selHoleVertexY");
+  if (xInput) xInput.value = String(roundTo(position.x, 3));
+  if (yInput) yInput.value = String(roundTo(position.y, 3));
 }
 
 function renderSelectionPanel() {
@@ -3020,6 +3220,8 @@ function renderSelectionPanel() {
   else if (entry.type === "bomb") renderBombSelection(entry);
   else if (entry.type === "wall") renderWallSelection(entry);
   else if (entry.type === "boundary") renderBoundarySelection(entry);
+  else if (entry.type === "hole") renderHoleSelection(entry);
+  else if (entry.type === "holeVertex") renderHoleVertexSelection(entry);
   else if (entry.type === "structure") renderStructureSelection(entry);
 }
 
@@ -3206,6 +3408,49 @@ function renderBoundarySelection(entry) {
   document.getElementById("deleteBoundaryBtn").addEventListener("click", deleteSelected);
 }
 
+function renderHoleSelection(entry) {
+  const hole = entry.item;
+  const index = state.map_holes.indexOf(hole);
+  const center = getHoleCenter(hole);
+  el.selectionPanel.innerHTML = `
+    ${selectionTypeRow(`Map Hole ${index}`)}
+    <label class="field"><span>Vertices</span><span class="readonly-tag">${hole.points.length}</span></label>
+    <label class="field"><span>centre x</span><input id="selHoleX" type="number" step="0.1" value="${roundTo(center.x, 3)}"></label>
+    <label class="field"><span>centre y</span><input id="selHoleY" type="number" step="0.1" value="${roundTo(center.y, 3)}"></label>
+    ${snapToggleMarkup()}
+    <button id="deleteHoleBtn" class="danger-button">Delete Hole</button>
+  `;
+  bindNumericChange("selHoleX", (value) => withAction("MOVE_HOLE", () => { moveHoleTo(hole, value, getHoleCenter(hole).y); return true; }));
+  bindNumericChange("selHoleY", (value) => withAction("MOVE_HOLE", () => { moveHoleTo(hole, getHoleCenter(hole).x, value); return true; }));
+  bindSnapToggle();
+  document.getElementById("deleteHoleBtn").addEventListener("click", deleteSelected);
+}
+
+function renderHoleVertexSelection(entry) {
+  const point = entry.item;
+  const hole = entry.hole;
+  const holeIndex = state.map_holes.indexOf(hole);
+  const pointIndex = hole.points.indexOf(point);
+  el.selectionPanel.innerHTML = `
+    ${selectionTypeRow("Hole Vertex")}
+    <label class="field"><span>Location</span><span class="readonly-tag">Hole ${holeIndex}, vertex ${pointIndex}</span></label>
+    <label class="field"><span>x</span><input id="selHoleVertexX" type="number" step="0.1" value="${point.x}"></label>
+    <label class="field"><span>y</span><input id="selHoleVertexY" type="number" step="0.1" value="${point.y}"></label>
+    ${snapToggleMarkup()}
+    <button id="deleteHoleVertexBtn" class="danger-button">Delete Vertex</button>
+    <button id="deleteParentHoleBtn" class="danger-button">Delete Entire Hole</button>
+  `;
+  bindNumericChange("selHoleVertexX", (value) => withAction("EDIT_HOLE_VERTEX", () => { point.x = roundTo(value, 3); return true; }));
+  bindNumericChange("selHoleVertexY", (value) => withAction("EDIT_HOLE_VERTEX", () => { point.y = roundTo(value, 3); return true; }));
+  bindSnapToggle();
+  document.getElementById("deleteHoleVertexBtn").addEventListener("click", deleteSelected);
+  document.getElementById("deleteParentHoleBtn").addEventListener("click", () => {
+    selection.clear();
+    selection.add(makeKey("hole", hole.uid));
+    deleteSelected();
+  });
+}
+
 function renderStructureSelection(entry) {
   const s = entry.item;
   el.selectionPanel.innerHTML = `
@@ -3288,11 +3533,16 @@ function deleteSelected() {
   }
   withAction(entries.length > 1 ? "DELETE_MULTI" : "DELETE_SINGLE", () => {
     const keys = new Set(entries.map((e) => e.key));
+    const holesToDelete = new Set(entries.filter((entry) => entry.type === "hole").map((entry) => entry.item.uid));
+    const verticesToDelete = new Set(entries.filter((entry) => entry.type === "holeVertex").map((entry) => entry.item.uid));
     state.towers = state.towers.filter((t) => !keys.has(makeKey("tower", t.uid)));
     const deletedTowerIds = new Set([...towersToDelete]);
     state.spawn_points = state.spawn_points.filter((s) => !keys.has(makeKey("spawn", s.uid)));
     state.bomb_sites = state.bomb_sites.filter((b) => !keys.has(makeKey("bomb", b.uid)));
     state.map_boundaries = state.map_boundaries.filter((p) => !keys.has(makeKey("boundary", p.uid)));
+    state.map_holes = state.map_holes
+      .filter((hole) => !holesToDelete.has(hole.uid))
+      .map((hole) => ({ ...hole, points: hole.points.filter((point) => !verticesToDelete.has(point.uid)) }));
     state.structures = state.structures.filter((s) => !keys.has(makeKey("structure", s.uid)));
     state.walls = state.walls.filter((w) => !keys.has(makeKey("wall", w.uid)) && !deletedTowerIds.has(w.t1) && !deletedTowerIds.has(w.t2));
     selection.clear();
@@ -3363,6 +3613,7 @@ function onStateChanged() {
 }
 
 function onStateReplaced() {
+  normalizeMapHolesInState();
   normalizeTowerHealthInState();
   interaction.wallDraft = null;
   interaction.hoverTowerId = null;
@@ -3376,6 +3627,7 @@ function onStateReplaced() {
   interaction.resize = null;
   interaction.boxSelect = null;
   interaction.mirrorDraft = null;
+  interaction.holeDraft = null;
   interaction.guides = { x: null, y: null, xPoints: [], yPoints: [] };
   hydrateCountersFromState();
   sanitizeSelection();
@@ -3393,6 +3645,7 @@ function restoreSavedSession() {
     const saved = JSON.parse(raw);
     if (!isSessionStateShape(saved?.state)) return;
     state = saved.state;
+    normalizeMapHolesInState();
     normalizeTowerHealthInState();
     if (Array.isArray(saved?.history?.undo)) history.undo = saved.history.undo.filter(isLocalHistoryEntry).slice(-history.limit);
     if (Array.isArray(saved?.history?.redo)) history.redo = saved.history.redo.filter(isLocalHistoryEntry).slice(-history.limit);
@@ -3440,6 +3693,17 @@ function normalizeTowerHealthInState() {
   });
 }
 
+function normalizeMapHolesInState() {
+  if (!Array.isArray(state.map_holes)) state.map_holes = [];
+  state.map_holes.forEach((hole) => {
+    if (!hole.uid) hole.uid = createUid("hole");
+    if (!Array.isArray(hole.points)) hole.points = [];
+    hole.points.forEach((point) => {
+      if (!point.uid) point.uid = createUid("hole_vertex");
+    });
+  });
+}
+
 function saveSession() {
   try {
     localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
@@ -3462,6 +3726,7 @@ function isSessionStateShape(value) {
   return Boolean(value)
     && typeof value === "object"
     && Array.isArray(value.map_boundaries)
+    && (value.map_holes === undefined || Array.isArray(value.map_holes))
     && Array.isArray(value.spawn_points)
     && Array.isArray(value.bomb_sites)
     && Array.isArray(value.towers)
@@ -3484,6 +3749,7 @@ function getInvalidObjects(mapState = state) {
     });
   };
   addInvalid("boundary", mapState.map_boundaries);
+  addInvalid("hole", mapState.map_holes);
   addInvalid("spawn", mapState.spawn_points);
   addInvalid("bomb", mapState.bomb_sites);
   addInvalid("tower", mapState.towers);
@@ -3500,7 +3766,7 @@ function isObjectInvalid(type, item, mapState = state) {
 }
 
 function isObjectOutsideBoundary(type, item, mapState = state) {
-  return !isPlacementInsideBoundary(type, item.x, item.y, item, mapState);
+  return !isPlacementInsideOuterBoundary(type, item.x, item.y, item, mapState);
 }
 
 function getMapValidationReport(mapState = state) {
@@ -3611,6 +3877,22 @@ function getMapValidationReport(mapState = state) {
     });
   });
 
+  HOLE_GEOMETRY.validateMapHoles(mapState).forEach((issue) => {
+    const keys = [];
+    issue.holeIndexes.forEach((holeIndex) => {
+      const hole = mapState.map_holes[holeIndex];
+      if (!hole) return;
+      keys.push(keyFor("hole", hole));
+      (hole.points || []).forEach((point) => keys.push(keyFor("holeVertex", point)));
+    });
+    if (issue.entity) {
+      const collectionByType = { spawn: mapState.spawn_points, tower: mapState.towers, bomb: mapState.bomb_sites };
+      const item = collectionByType[issue.entity.type]?.[issue.entity.index];
+      keys.push(keyFor(issue.entity.type, item));
+    }
+    addIssue(issue.message, keys);
+  });
+
   return { issues, invalidKeys };
 }
 
@@ -3653,6 +3935,7 @@ function draw() {
   drawGrid();
   drawMirrorAxes();
   drawBoundaryFogMask();
+  drawHoles();
   drawBoundary();
   drawBombSites();
   drawStructures();
@@ -3788,6 +4071,41 @@ function drawBoundary() {
     ctx.arc(p.x, p.y, selected ? 6 : 4, 0, Math.PI * 2);
     ctx.fillStyle = invalid ? COLORS.danger : (selected ? "#FFFFFF" : "#AEBAC8");
     ctx.fill();
+  });
+}
+
+function drawHoles() {
+  state.map_holes.forEach((hole) => {
+    if (!hole.points.length) return;
+    const selected = selection.has(makeKey("hole", hole.uid));
+    const invalid = isObjectInvalid("hole", hole);
+    ctx.beginPath();
+    hole.points.forEach((point, index) => {
+      const screen = worldToScreen(point.x, point.y);
+      if (index === 0) ctx.moveTo(screen.x, screen.y);
+      else ctx.lineTo(screen.x, screen.y);
+    });
+    if (hole.points.length >= 3) ctx.closePath();
+    ctx.fillStyle = invalid ? withAlpha(COLORS.danger, 0.38) : COLORS.holeFill;
+    if (hole.points.length >= 3) ctx.fill();
+    ctx.lineWidth = (selected ? 6 : 3.5) * view.scale;
+    ctx.strokeStyle = invalid ? COLORS.danger : (selected ? "#FFFFFF" : COLORS.holeRim);
+    ctx.stroke();
+
+    hole.points.forEach((point) => {
+      const screen = worldToScreen(point.x, point.y);
+      const pointSelected = selection.has(makeKey("holeVertex", point.uid));
+      const pointInvalid = isObjectInvalid("holeVertex", point);
+      ctx.beginPath();
+      ctx.arc(screen.x, screen.y, pointSelected ? 7 : selected ? 5.5 : 4, 0, Math.PI * 2);
+      ctx.fillStyle = pointInvalid ? COLORS.danger : (pointSelected ? "#FFE08A" : selected ? "#FFFFFF" : COLORS.holeRim);
+      ctx.fill();
+      if (pointSelected) {
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "#FFFFFF";
+        ctx.stroke();
+      }
+    });
   });
 }
 
@@ -4018,6 +4336,8 @@ function drawPlacementGhost() {
     drawBombGhost(ghost);
   } else if (ghost.type === "boundary") {
     drawBoundaryGhost(ghost);
+  } else if (ghost.type === "hole") {
+    drawHoleGhost(ghost);
   }
 }
 
@@ -4185,6 +4505,40 @@ function drawBoundaryGhost(ghost) {
   ctx.stroke();
 }
 
+function drawHoleGhost(ghost) {
+  const points = interaction.holeDraft?.points || [];
+  const previewPoints = [...points, ...(ghost.closing ? [] : [{ x: ghost.x, y: ghost.y }])];
+  if (!previewPoints.length) return;
+  ctx.beginPath();
+  previewPoints.forEach((point, index) => {
+    const screen = worldToScreen(point.x, point.y);
+    if (index === 0) ctx.moveTo(screen.x, screen.y);
+    else ctx.lineTo(screen.x, screen.y);
+  });
+  if (ghost.closing && points.length >= 3) ctx.closePath();
+  ctx.lineWidth = 3 * view.scale;
+  ctx.strokeStyle = ghost.invalid ? COLORS.danger : withAlpha(COLORS.guide, 0.9);
+  ctx.stroke();
+  if (ghost.closing && points.length >= 3) {
+    ctx.fillStyle = ghost.invalid ? withAlpha(COLORS.danger, 0.25) : "rgba(2, 5, 11, 0.72)";
+    ctx.fill();
+  }
+  points.forEach((point, index) => {
+    const screen = worldToScreen(point.x, point.y);
+    ctx.beginPath();
+    ctx.arc(screen.x, screen.y, index === 0 ? 7 : 5, 0, Math.PI * 2);
+    ctx.fillStyle = index === 0 && ghost.closing ? "#FFFFFF" : withAlpha(COLORS.guide, 0.95);
+    ctx.fill();
+  });
+  if (!ghost.closing) {
+    const screen = worldToScreen(ghost.x, ghost.y);
+    ctx.beginPath();
+    ctx.arc(screen.x, screen.y, 6, 0, Math.PI * 2);
+    ctx.fillStyle = ghost.invalid ? COLORS.danger : COLORS.guide;
+    ctx.fill();
+  }
+}
+
 function drawOctagon(cx, cy, r) {
   ctx.beginPath();
   for (let i = 0; i < 8; i += 1) {
@@ -4334,24 +4688,7 @@ function exportJSON() {
     requestRender();
     return;
   }
-  const payload = {
-    spawn_protection_size: Number(exportState.spawn_protection_size),
-    map_boundaries: exportState.map_boundaries.map((p) => ({ x: roundTo(p.x, 3), y: roundTo(p.y, 3) })),
-    spawn_points: exportState.spawn_points.map((s) => ({ team_id: s.team_id, x: roundTo(s.x, 3), y: roundTo(s.y, 3) })).sort((a, b) => a.team_id - b.team_id),
-    bomb_sites: exportState.bomb_sites.map((b) => ({ site_letter: String(b.site_letter || "A").toUpperCase(), x: roundTo(b.x, 3), y: roundTo(b.y, 3) })),
-    towers: [...exportState.towers].sort((a, b) => a.id - b.id).map((t) => ({
-      id: t.id,
-      team_id: t.team_id,
-      x: roundTo(t.x, 3),
-      y: roundTo(t.y, 3),
-      health: clamp(1, Math.round(t.health), GAME.TOWER_MAX_HEALTH),
-      is_invincible: Boolean(t.is_invincible),
-    })),
-    walls: exportState.walls.map((w) => ({ t1: w.t1, t2: w.t2, team_id: w.team_id })),
-  };
-  if (exportState.structures.length) {
-    payload.structures = exportState.structures.map((s) => ({ id: s.id, x: roundTo(s.x, 3), y: roundTo(s.y, 3), size: s.size, label: s.label, color: s.color, team_id: s.team_id }));
-  }
+  const payload = buildExportPayload(exportState);
   const json = JSON.stringify(payload, null, 2);
   const blob = new Blob([json], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -4363,6 +4700,37 @@ function exportJSON() {
   a.remove();
   URL.revokeObjectURL(url);
   setActionState(invalidRemoved ? `Export successful; removed ${invalidRemoved} invalid object${invalidRemoved === 1 ? "" : "s"}` : "Export successful", "success", true);
+}
+
+function buildExportPayload(exportState) {
+  const payload = {
+    spawn_protection_size: Number(exportState.spawn_protection_size),
+    map_boundaries: exportState.map_boundaries.map((point) => ({ x: roundTo(point.x, 3), y: roundTo(point.y, 3) })),
+    spawn_points: exportState.spawn_points.map((spawn) => ({ team_id: spawn.team_id, x: roundTo(spawn.x, 3), y: roundTo(spawn.y, 3) })).sort((a, b) => a.team_id - b.team_id),
+    bomb_sites: exportState.bomb_sites.map((bomb) => ({ site_letter: String(bomb.site_letter || "A").toUpperCase(), x: roundTo(bomb.x, 3), y: roundTo(bomb.y, 3) })),
+    towers: [...exportState.towers].sort((a, b) => a.id - b.id).map((tower) => ({
+      id: tower.id,
+      team_id: tower.team_id,
+      x: roundTo(tower.x, 3),
+      y: roundTo(tower.y, 3),
+      health: clamp(1, Math.round(tower.health), GAME.TOWER_MAX_HEALTH),
+      is_invincible: Boolean(tower.is_invincible),
+    })),
+    walls: exportState.walls.map((wall) => ({ t1: wall.t1, t2: wall.t2, team_id: wall.team_id })),
+  };
+  HOLE_GEOMETRY.addMapHolesToPayload(payload, exportState.map_holes, (value) => roundTo(value, 3));
+  if (exportState.structures.length) {
+    payload.structures = exportState.structures.map((structure) => ({
+      id: structure.id,
+      x: roundTo(structure.x, 3),
+      y: roundTo(structure.y, 3),
+      size: structure.size,
+      label: structure.label,
+      color: structure.color,
+      team_id: structure.team_id,
+    }));
+  }
+  return payload;
 }
 
 function getOutOfBoundsObjects(mapState = state) {
@@ -4444,6 +4812,7 @@ function importMap(event) {
 function parseImportedState(data) {
   if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Root must be an object.");
   const mapRaw = expectArray(data.map_boundaries, "map_boundaries");
+  const holes = HOLE_GEOMETRY.parseMapHoles(data.map_holes, createUid);
   const spawnRaw = expectArray(data.spawn_points, "spawn_points");
   const bombRaw = expectArray(data.bomb_sites, "bomb_sites");
   const towersRaw = expectArray(data.towers, "towers");
@@ -4452,6 +4821,7 @@ function parseImportedState(data) {
   const imported = {
     spawn_protection_size: expectNumber(data.spawn_protection_size, "spawn_protection_size"),
     map_boundaries: mapRaw.map((p, i) => ({ uid: createUid("boundary"), x: expectNumber(p?.x, `map_boundaries[${i}].x`), y: expectNumber(p?.y, `map_boundaries[${i}].y`) })),
+    map_holes: holes,
     spawn_points: spawnRaw.map((s, i) => ({ uid: createUid("spawn"), team_id: expectInteger(s?.team_id, `spawn_points[${i}].team_id`), x: expectNumber(s?.x, `spawn_points[${i}].x`), y: expectNumber(s?.y, `spawn_points[${i}].y`) })),
     bomb_sites: bombRaw.map((b, i) => ({ uid: createUid("bomb"), site_letter: expectString(b?.site_letter, `bomb_sites[${i}].site_letter`).toUpperCase(), x: expectNumber(b?.x, `bomb_sites[${i}].x`), y: expectNumber(b?.y, `bomb_sites[${i}].y`) })),
     towers: towersRaw.map((t, i) => ({
@@ -4674,7 +5044,7 @@ function applySelectedMapPreset() {
   el.mapPresetHeight.value = String(roundTo(height, 1));
   const points = getMapPresetPoints(preset, width, height);
   if (!points.length) return;
-  const hasPlacedContent = state.towers.length || state.walls.length || state.spawn_points.length || state.bomb_sites.length || state.structures.length;
+  const hasPlacedContent = state.map_holes.length || state.towers.length || state.walls.length || state.spawn_points.length || state.bomb_sites.length || state.structures.length;
   if (hasPlacedContent && !confirm("Replace the current boundary with this preset? Existing objects will be kept.")) return;
   withAction("APPLY_MAP_PRESET", () => {
     state.map_boundaries = points.map((point) => ({ uid: createUid("boundary"), x: roundTo(point.x, 3), y: roundTo(point.y, 3) }));
@@ -5179,6 +5549,7 @@ function getSelectableEntries() {
   state.bomb_sites.forEach((item) => list.push({ type: "bomb", item, key: makeKey("bomb", item.uid), movable: true }));
   state.walls.forEach((item) => list.push({ type: "wall", item, key: makeKey("wall", item.uid), movable: false }));
   state.map_boundaries.forEach((item) => list.push({ type: "boundary", item, key: makeKey("boundary", item.uid), movable: true }));
+  state.map_holes.forEach((item) => list.push({ type: "hole", item, key: makeKey("hole", item.uid), movable: true }));
   state.structures.forEach((item) => list.push({ type: "structure", item, key: makeKey("structure", item.uid), movable: true }));
   return list;
 }
@@ -5206,6 +5577,17 @@ function resolveKey(key) {
     const item = state.map_boundaries.find((x) => x.uid === uid);
     return item ? { type, item, key, movable: true } : null;
   }
+  if (type === "hole") {
+    const item = state.map_holes.find((hole) => hole.uid === uid);
+    return item ? { type, item, key, movable: true } : null;
+  }
+  if (type === "holeVertex") {
+    for (const hole of state.map_holes) {
+      const item = hole.points.find((point) => point.uid === uid);
+      if (item) return { type, item, hole, key, movable: true };
+    }
+    return null;
+  }
   if (type === "structure") {
     const item = state.structures.find((x) => x.uid === uid);
     return item ? { type, item, key, movable: true } : null;
@@ -5214,6 +5596,8 @@ function resolveKey(key) {
 }
 
 function getEntryCenter(entry) {
+  if (entry.type === "hole") return getHoleCenter(entry.item);
+  if (entry.type === "holeVertex") return { x: entry.item.x, y: entry.item.y };
   if (["tower", "spawn", "bomb", "boundary", "structure"].includes(entry.type)) return { x: entry.item.x, y: entry.item.y };
   if (entry.type === "wall") {
     const a = getTowerById(entry.item.t1);
@@ -5228,11 +5612,16 @@ function makeKey(type, uid) { return `${type}:${uid}`; }
 function getKeyPosition(key) {
   const entry = resolveKey(key);
   if (!entry || !entry.movable) return null;
+  if (entry.type === "hole") return getHoleCenter(entry.item);
   return { x: entry.item.x, y: entry.item.y };
 }
 function setKeyPosition(key, x, y) {
   const entry = resolveKey(key);
   if (!entry || !entry.movable) return;
+  if (entry.type === "hole") {
+    moveHoleTo(entry.item, x, y);
+    return;
+  }
   entry.item.x = x;
   entry.item.y = y;
 }
@@ -5246,6 +5635,10 @@ function hitTest(world) {
   if (bomb) return { key: makeKey("bomb", bomb.uid), movable: true };
   const structure = hitStructure(world);
   if (structure) return { key: makeKey("structure", structure.uid), movable: true };
+  const holeVertex = hitHoleVertex(world);
+  if (holeVertex) return { key: makeKey("holeVertex", holeVertex.uid), movable: true };
+  const hole = hitHole(world);
+  if (hole) return { key: makeKey("hole", hole.uid), movable: true };
   const boundary = hitBoundary(world);
   if (boundary) return { key: makeKey("boundary", boundary.uid), movable: true };
   const wall = hitWall(world);
@@ -5280,6 +5673,27 @@ function hitStructure(world) {
     const s = state.structures[i];
     const half = s.size / 2;
     if (Math.abs(world.x - s.x) <= half && Math.abs(world.y - s.y) <= half) return s;
+  }
+  return null;
+}
+function hitHoleVertex(world) {
+  const threshold = 18 / Math.max(view.scale, 0.0001);
+  for (let holeIndex = state.map_holes.length - 1; holeIndex >= 0; holeIndex -= 1) {
+    const points = state.map_holes[holeIndex].points;
+    for (let pointIndex = points.length - 1; pointIndex >= 0; pointIndex -= 1) {
+      if (distance(world.x, world.y, points[pointIndex].x, points[pointIndex].y) <= threshold) return points[pointIndex];
+    }
+  }
+  return null;
+}
+function hitHole(world) {
+  const rimThreshold = 12 / Math.max(view.scale, 0.0001);
+  for (let index = state.map_holes.length - 1; index >= 0; index -= 1) {
+    const hole = state.map_holes[index];
+    if (HOLE_GEOMETRY.pointInPolygon(world, hole.points, true)) return hole;
+    for (let edge = 0; edge < hole.points.length; edge += 1) {
+      if (pointToSegmentDistance(world, hole.points[edge], hole.points[(edge + 1) % hole.points.length]) <= rimThreshold) return hole;
+    }
   }
   return null;
 }
@@ -5384,6 +5798,10 @@ function hydrateCountersFromState() {
     if (m) maxUid = Math.max(maxUid, Number(m[1]));
   };
   state.map_boundaries.forEach((p) => scanUid(p.uid));
+  state.map_holes.forEach((hole) => {
+    scanUid(hole.uid);
+    (hole.points || []).forEach((point) => scanUid(point.uid));
+  });
   state.spawn_points.forEach((p) => scanUid(p.uid));
   state.bomb_sites.forEach((p) => scanUid(p.uid));
   state.towers.forEach((t) => { scanUid(t.uid); maxTower = Math.max(maxTower, t.id); });
@@ -5517,6 +5935,17 @@ function isInsideCurrentBoundary(x, y, mapState = state) {
 }
 
 function isPlacementInsideBoundary(type, x, y, item = null, mapState = state) {
+  if (!isPlacementInsideOuterBoundary(type, x, y, item, mapState)) return false;
+  if (type === "tower" || type === "spawn") {
+    return HOLE_GEOMETRY.findContainingHoleIndex({ x, y }, mapState.map_holes || []) < 0;
+  }
+  if (type === "bomb") {
+    return HOLE_GEOMETRY.findCircleOverlappingHoleIndex({ x, y }, 250, mapState.map_holes || []) < 0;
+  }
+  return true;
+}
+
+function isPlacementInsideOuterBoundary(type, x, y, item = null, mapState = state) {
   if (!hasUsableBoundary(mapState)) return false;
   if (type === "tower") return isCircleInsideBoundary(x, y, GAME.TOWER_DIAMETER / 2, mapState);
   if (type === "bomb") return isCircleInsideBoundary(x, y, 250, mapState);
@@ -5836,6 +6265,7 @@ function createInitialState() {
   return {
     spawn_protection_size: 500,
     map_boundaries: getMapPresetPoints("square", 4000, 4000).map((point) => ({ uid: createUid("boundary"), ...point })),
+    map_holes: [],
     spawn_points: [],
     bomb_sites: [],
     towers: [],
@@ -5847,4 +6277,61 @@ function createInitialState() {
 function ensureDefaultBoundary() {
   if (state.map_boundaries.length) return;
   state.map_boundaries = getMapPresetPoints("square", 4000, 4000).map((point) => ({ uid: createUid("boundary"), ...point }));
+}
+
+if (globalThis.__COSMOWAR_EDITOR_TEST__) {
+  globalThis.CosmowarEditorTestApi = {
+    importState(data) {
+      state = parseImportedState(data);
+      history.undo = [];
+      history.redo = [];
+      selection.clear();
+      normalizeMapHolesInState();
+      return cloneState(state);
+    },
+    getState: () => cloneState(state),
+    exportState: () => buildExportPayload(state),
+    validationMessages: () => getMapValidationReport(state).issues.map((issue) => issue.message),
+    isPlacementAllowed: (type, x, y) => isPlacementInsideBoundary(type, x, y),
+    createHole(points) {
+      const previousLength = state.map_holes.length;
+      interaction.holeDraft = { points: points.map((point) => ({ x: Number(point.x), y: Number(point.y) })) };
+      if (!finishHoleDraft()) return null;
+      return state.map_holes[previousLength]?.uid || null;
+    },
+    moveHoleVertex(holeIndex, vertexIndex, x, y) {
+      return withAction("EDIT_HOLE_VERTEX", () => {
+        const point = state.map_holes[holeIndex]?.points?.[vertexIndex];
+        if (!point) return false;
+        point.x = Number(x);
+        point.y = Number(y);
+        return true;
+      });
+    },
+    moveHole(holeIndex, x, y) {
+      return withAction("MOVE_HOLE", () => {
+        const hole = state.map_holes[holeIndex];
+        if (!hole) return false;
+        moveHoleTo(hole, Number(x), Number(y));
+        return true;
+      });
+    },
+    deleteHole(holeIndex) {
+      const hole = state.map_holes[holeIndex];
+      if (!hole) return false;
+      selection.clear();
+      selection.add(makeKey("hole", hole.uid));
+      deleteSelected();
+      return true;
+    },
+    undo: undoAction,
+    redo: redoAction,
+    historyCounts: () => ({ undo: history.undo.length, redo: history.redo.length }),
+    fitView(width, height) {
+      viewport.width = width;
+      viewport.height = height;
+      fitBoundaryInView();
+      return { ...view };
+    },
+  };
 }

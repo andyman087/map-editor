@@ -23,6 +23,7 @@
         <div class="tool-grid">
           <button class="tool-button active" data-tool="select">Select / Move</button>
           <button class="tool-button" data-tool="boundary">Draw Boundary</button>
+          <button class="tool-button" data-tool="hole">Draw Hole</button>
           <button class="tool-button" data-tool="spawn">Place Spawn</button>
           <button class="tool-button" data-tool="bomb">Place Bomb Site</button>
           <button class="tool-button" data-tool="build">Build</button>
@@ -177,6 +178,7 @@
           <li>Right click or middle click and drag to pan.</li>
           <li>Use WASD or the arrow keys to move around the map.</li>
           <li>Shift/Ctrl/Cmd + click to multi-select in Select / Move.</li>
+          <li>Draw Hole: click vertices, then click the first vertex to close. Esc cancels.</li>
           <li>Hold Ctrl to temporarily disable object and grid snapping.</li>
           <li>Ctrl+C copies selection; left click places the ghost copy.</li>
           <li>Alt + drag rotates a selected group.</li>
@@ -192,6 +194,7 @@
 
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
   <script src="defly-import.js"></script>
+  <script src="map-hole-geometry.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
