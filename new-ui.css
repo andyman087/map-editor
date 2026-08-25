@@ -1,0 +1,67 @@
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  overflow: hidden;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+#shellNew {
+  position: fixed;
+  inset: 0;
+  background: #0d0f17;
+}
+
+#shellNew .new-workspace {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+#shellNew #mapCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.ui-mode-switch {
+  position: fixed;
+  z-index: 200;
+  top: 10px;
+  left: 50%;
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  transform: translateX(-50%);
+  border: 1px solid #35404f;
+  border-radius: 999px;
+  background: #151a22;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+}
+
+.ui-mode-switch button {
+  height: 24px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #aab4c2;
+  font: 500 12px/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.ui-mode-switch button[aria-pressed="true"] {
+  background: #79dc87;
+  color: #07130a;
+}
+
+.ui-mode-switch button:focus-visible {
+  outline: 2px solid #79dc87;
+  outline-offset: 2px;
+}

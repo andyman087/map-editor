@@ -5,8 +5,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Cosmowar Map Editor</title>
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="new-ui.css">
 </head>
 <body>
+  <div class="ui-mode-switch" role="group" aria-label="Interface version">
+    <button type="button" data-ui-shell="current" aria-pressed="false">Current</button>
+    <button type="button" data-ui-shell="new" aria-pressed="true">New</button>
+  </div>
+
+  <div id="shellNew" aria-label="New interface">
+    <main id="newWorkspace" class="new-workspace" aria-label="Map workspace"></main>
+  </div>
+
+  <div id="shellCurrent" aria-label="Current interface">
   <div class="app-shell">
     <aside class="sidebar left-sidebar">
       <div class="sidebar-header">
@@ -240,12 +251,14 @@
       </section>
     </aside>
   </div>
+  </div>
 
   <div id="multiplayerToastStack" class="multiplayer-toast-stack" aria-live="polite" aria-atomic="false"></div>
 
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
   <script src="defly-import.js"></script>
   <script src="map-hole-geometry.js"></script>
+  <script src="ui-shell.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
