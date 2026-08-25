@@ -655,7 +655,14 @@
     border-radius: 999px;
     background: var(--surface-2);
     color: var(--text-2);
+    cursor: pointer;
   }
+
+  .session-chip:hover,
+  .session-chip[aria-expanded="true"] { border-color: var(--accent-dim); color: var(--text); }
+  .session-chip.is-offline .live-dot { background: var(--text-3); box-shadow: none; }
+  .session-chip.is-connecting .live-dot { background: var(--warn); box-shadow: 0 0 8px var(--warn); animation: sessionPulse 1s ease-in-out infinite; }
+  @keyframes sessionPulse { 50% { opacity: .45; } }
 
   .live-dot {
     width: 7px;
@@ -664,6 +671,36 @@
     background: var(--accent);
     box-shadow: 0 0 8px var(--accent);
   }
+
+  .session-popover { width: 304px; padding: 0; overflow: hidden; }
+  .session-popover-head { display: flex; align-items: center; gap: 12px; padding: 12px 13px 9px; border-bottom: 1px solid var(--line); }
+  .session-popover-head > div { min-width: 0; flex: 1; }
+  .session-popover-head strong,
+  .session-popover-head span { display: block; }
+  .session-popover-head strong { color: var(--text); font-size: 13px; }
+  .session-popover-head #sessionStateLabel { margin-top: 2px; color: var(--text-3); font-size: 11.5px; }
+  .session-count { flex: none; padding: 3px 7px; border-radius: 999px; background: var(--surface-3); color: var(--text-2); font: 11px var(--ff-mono); }
+  .session-participants { display: grid; gap: 1px; max-height: 190px; padding: 6px; overflow-y: auto; }
+  .session-participant { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 32px; padding: 4px 7px; border-radius: 5px; }
+  .session-participant.is-local { background: var(--surface-2); }
+  .session-participant-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .session-participant-name { min-width: 0; overflow: hidden; color: var(--text-2); text-overflow: ellipsis; white-space: nowrap; }
+  .session-participant.is-local .session-participant-name { color: var(--text); font-weight: 500; }
+  .session-participant-role { color: var(--text-3); font: 10.5px var(--ff-mono); }
+  .session-divider { height: 1px; background: var(--line); }
+  .session-name { display: grid; grid-template-columns: 48px minmax(0, 1fr); align-items: center; gap: 8px; padding: 10px 13px 7px; color: var(--text-3); font-size: 12px; }
+  .session-name input { min-width: 0; }
+  .session-status { min-height: 34px; margin: 0; padding: 2px 13px 9px; color: var(--text-3); font-size: 11.5px; line-height: 1.4; }
+  .session-status[data-tone="success"] { color: var(--accent); }
+  .session-status[data-tone="warn"] { color: var(--warn); }
+  .session-status[data-tone="error"] { color: var(--danger); }
+  .session-popover > .session-action { min-height: 36px; padding: 7px 13px; border-top: 1px solid var(--line); border-radius: 0; }
+  .session-popover > .session-action.danger { color: var(--danger); }
+  .session-popover > .session-action:disabled { opacity: .5; cursor: wait; }
+
+  .multiplayer-toast { pointer-events: none; }
+  .multiplayer-toast > div > span { display: block; margin-top: 1px; color: var(--text-2); font-size: 12.5px; }
+  .multiplayer-toast.is-hiding { animation: newToastOut 180ms ease-in forwards; }
 
   .toolrail .tool-button,
   .toolrail .library-button {

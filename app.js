@@ -104,7 +104,15 @@ const el = {
   finishDeflyConversionBtn: document.getElementById("finishDeflyConversionBtn"),
   cancelDeflyConversionBtn: document.getElementById("cancelDeflyConversionBtn"),
   usernameInput: document.getElementById("usernameInput"),
+  sessionUsernameInput: document.getElementById("sessionUsernameInput"),
   hostSessionBtn: document.getElementById("hostSessionBtn"),
+  sessionInviteBtn: document.getElementById("sessionInviteBtn"),
+  sessionLeaveBtn: document.getElementById("sessionLeaveBtn"),
+  sessionMenuBtn: document.getElementById("sessionMenuBtn"),
+  sessionParticipantList: document.getElementById("sessionParticipantList"),
+  sessionEditorCount: document.getElementById("sessionEditorCount"),
+  sessionStateLabel: document.getElementById("sessionStateLabel"),
+  sessionStatusText: document.getElementById("sessionStatusText"),
   multiplayerToastStack: document.getElementById("multiplayerToastStack"),
   towerHealthInput: document.getElementById("towerHealthInput"),
   towerInvincibleInput: document.getElementById("towerInvincibleInput"),
@@ -218,6 +226,8 @@ class MultiplayerManager {
     this.reconnectAttempts = 0;
     this.maxReconnectAttempts = 24;
     this.lastToast = { text: "", at: 0 };
+    this.statusText = "Not connected. Start a session to invite collaborators.";
+    this.statusTone = "info";
     this.succession = new SuccessionLogic(this);
     this.validator = new ActionValidator(this);
     this.rollback = new RollbackHandler(this);
@@ -225,15 +235,23 @@ class MultiplayerManager {
 
   bindUI() {
     if (!el.usernameInput) return;
-    el.usernameInput.value = this.getUsername();
-    el.usernameInput.addEventListener("change", () => {
+    const usernameInputs = [el.usernameInput, el.sessionUsernameInput].filter(Boolean);
+    const initialUsername = this.getUsername();
+    usernameInputs.forEach((input) => { input.value = initialUsername; });
+    usernameInputs.forEach((input) => input.addEventListener("input", () => {
+      usernameInputs.forEach((other) => { if (other !== input) other.value = input.value; });
+    }));
+    usernameInputs.forEach((input) => input.addEventListener("change", () => {
       const username = this.getUsername();
+      usernameInputs.forEach((other) => { other.value = username; });
       localStorage.setItem(MULTIPLAYER_USERNAME_KEY, username);
       this.updateLocalPeerMeta();
       this.broadcastPeerList();
       this.setStatus(`Username set to ${username}`);
-    });
+    }));
     el.hostSessionBtn?.addEventListener("click", () => this.copyOrCreateHostLink());
+    el.sessionInviteBtn?.addEventListener("click", () => this.copyOrCreateHostLink());
+    el.sessionLeaveBtn?.addEventListener("click", () => this.leaveSession());
     this.autofillAndAutoJoinFromUrl();
     this.updateUi();
   }
@@ -253,6 +271,15 @@ class MultiplayerManager {
       return;
     }
     this.hostSession({ copyOnOpen: true });
+  }
+
+  leaveSession() {
+    if (this.role === "offline") return;
+    this.closeExistingConnections();
+    const url = new URL(window.location.href);
+    url.searchParams.delete("host");
+    window.history?.replaceState?.({}, "", url);
+    this.setStatus("You left the live session.", "warn");
   }
 
   hostSession(options = {}) {
@@ -400,7 +427,15 @@ class MultiplayerManager {
   attachPeerEvents() {
     if (!this.peer) return;
     this.peer.on("connection", (conn) => this.acceptIncomingConnection(conn));
-    this.peer.on("error", (error) => this.setStatus(`Peer error: ${error.type || error.message}`, "warn"));
+    this.peer.on("error", (error) => {
+      const message = `Peer error: ${error.type || error.message}`;
+      if (this.role === "hosting") {
+        this.closeExistingConnections();
+        this.setStatus(message, "error");
+        return;
+      }
+      this.setStatus(message, "warn");
+    });
     this.peer.on("disconnected", () => this.setStatus("Peer server disconnected; existing P2P links may remain open.", "warn"));
   }
 
@@ -474,6 +509,7 @@ class MultiplayerManager {
         role: "client",
       };
       this.broadcastPeerList();
+      this.updateUi();
     }
   }
 
@@ -612,6 +648,7 @@ class MultiplayerManager {
       onStateReplaced();
     });
     queueRedraw();
+    this.updateUi();
   }
 
   runWithoutNetwork(fn) {
@@ -751,6 +788,7 @@ class MultiplayerManager {
       });
     }
     queueRedraw();
+    this.updateUi();
   }
 
   receiveClientCursor(peerId, payload) {
@@ -770,6 +808,7 @@ class MultiplayerManager {
 
   receiveRemoteCursor(payload) {
     if (!payload.peerId || payload.peerId === this.localPeerId) return;
+    const isNewPeer = !this.connectedPeers[payload.peerId];
     const info = this.connectedPeers[payload.peerId] || {};
     this.connectedPeers[payload.peerId] = {
       ...info,
@@ -780,6 +819,7 @@ class MultiplayerManager {
       y: payload.y,
       role: payload.role || info.role || "peer",
     };
+    if (isNewPeer) this.updateUi();
     queueRedraw();
   }
 
@@ -909,14 +949,104 @@ class MultiplayerManager {
   }
 
   updateUi() {
+    const model = this.getUiModel();
     if (el.hostSessionBtn) {
-      el.hostSessionBtn.textContent = this.role === "hosting" ? "Starting..." : "Copy host link";
-      el.hostSessionBtn.disabled = this.role === "hosting";
+      el.hostSessionBtn.textContent = model.inviteLabel;
+      el.hostSessionBtn.disabled = model.inviteDisabled;
+    }
+    if (el.sessionInviteBtn) {
+      const label = el.sessionInviteBtn.querySelector("span");
+      if (label) label.textContent = model.inviteLabel;
+      el.sessionInviteBtn.disabled = model.inviteDisabled;
+    }
+    if (el.sessionLeaveBtn) el.sessionLeaveBtn.hidden = !model.canLeave;
+    if (el.sessionMenuBtn) {
+      const label = el.sessionMenuBtn.querySelector("[data-session-label]");
+      if (label) label.textContent = model.topLabel;
+      el.sessionMenuBtn.classList.toggle("is-offline", model.state === "offline");
+      el.sessionMenuBtn.classList.toggle("is-connecting", model.connecting);
+      el.sessionMenuBtn.setAttribute("aria-label", `${model.topLabel}. ${model.stateLabel}`);
+    }
+    if (el.sessionEditorCount) el.sessionEditorCount.textContent = model.countLabel;
+    if (el.sessionStateLabel) el.sessionStateLabel.textContent = model.stateLabel;
+    if (el.sessionStatusText) {
+      el.sessionStatusText.textContent = model.statusText;
+      el.sessionStatusText.dataset.tone = model.statusTone;
+    }
+    if (el.sessionUsernameInput && document.activeElement !== el.sessionUsernameInput) {
+      el.sessionUsernameInput.value = this.getUsername();
+    }
+    if (el.sessionParticipantList) {
+      el.sessionParticipantList.textContent = "";
+      model.participants.forEach((participant) => {
+        const row = document.createElement("div");
+        row.className = `session-participant${participant.local ? " is-local" : ""}`;
+        const dot = document.createElement("span");
+        dot.className = "session-participant-dot";
+        dot.style.background = participant.color;
+        const name = document.createElement("span");
+        name.className = "session-participant-name";
+        name.textContent = participant.name;
+        const role = document.createElement("span");
+        role.className = "session-participant-role";
+        role.textContent = participant.roleLabel;
+        row.append(dot, name, role);
+        el.sessionParticipantList.appendChild(row);
+      });
     }
     this.updateInviteLink();
   }
 
+  getUiModel() {
+    const peers = Object.values(this.connectedPeers);
+    if (this.role === "client" && this.hostPeerId && !peers.some((peer) => peer.peerId === this.hostPeerId)) {
+      peers.unshift({
+        peerId: this.hostPeerId,
+        username: `Host ${this.hostPeerId.slice(0, 5)}`,
+        color: this.colorForPeer(this.hostPeerId),
+        role: "host",
+      });
+    }
+    const localRole = this.role === "host" ? "host" : this.role === "client" ? "you" : this.role === "hosting" ? "starting" : "local";
+    const participants = [{
+      peerId: this.localPeerId || "local",
+      name: this.getUsername(),
+      color: this.role === "offline" ? "#7A8CA3" : this.colorForPeer(this.localPeerId || "local"),
+      roleLabel: localRole,
+      local: true,
+    }, ...peers.map((peer) => ({
+      peerId: peer.peerId,
+      name: peer.username || peer.peerId || "Editor",
+      color: peer.color || this.colorForPeer(peer.peerId),
+      roleLabel: peer.role === "host" ? "host" : "editing",
+      local: false,
+    }))];
+    const active = this.role === "host" || this.role === "client";
+    const connecting = this.role === "hosting" || (this.role === "client" && (!this.hostConn?.open || this.migrationInProgress));
+    const stateLabel = this.role === "host"
+      ? "Hosting"
+      : this.role === "client"
+        ? (this.migrationInProgress ? "Reconnecting" : this.hostConn?.open ? "Connected" : "Joining")
+        : this.role === "hosting" ? "Starting" : "Offline";
+    return {
+      state: this.role,
+      stateLabel,
+      connecting,
+      participants,
+      topLabel: active ? `${participants.length} editing` : this.role === "hosting" ? "Starting…" : "Session",
+      countLabel: active ? `${participants.length} editing` : "1 local",
+      inviteLabel: this.role === "hosting" ? "Starting…" : active ? "Copy invite link" : "Start session & copy invite link",
+      inviteDisabled: this.role === "hosting",
+      canLeave: this.role !== "offline",
+      statusText: this.statusText,
+      statusTone: this.statusTone,
+    };
+  }
+
   setStatus(text, tone = "idle", options = {}) {
+    this.statusText = text;
+    this.statusTone = tone === "idle" ? "info" : tone;
+    this.updateUi();
     const shouldToast = options.toast ?? true;
     if (shouldToast) this.showStatusToast(text, tone === "idle" ? "info" : tone);
   }
@@ -928,14 +1058,22 @@ class MultiplayerManager {
     this.lastToast = { text, at: now };
 
     const toast = document.createElement("div");
-    toast.className = "multiplayer-toast";
+    toast.className = "toast multiplayer-toast";
     toast.dataset.tone = tone;
 
+    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    icon.setAttribute("class", "ico sm");
+    icon.setAttribute("aria-hidden", "true");
+    const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    use.setAttribute("href", tone === "success" ? "#i-check-circle" : tone === "error" || tone === "warn" ? "#i-warning" : "#i-info");
+    icon.appendChild(use);
     const title = document.createElement("strong");
     title.textContent = this.labelForStatusTone(tone);
     const body = document.createElement("span");
     body.textContent = text;
-    toast.append(title, body);
+    const content = document.createElement("div");
+    content.append(title, body);
+    toast.append(icon, content);
 
     el.multiplayerToastStack.appendChild(toast);
     while (el.multiplayerToastStack.children.length > 4) {
@@ -954,7 +1092,7 @@ class MultiplayerManager {
 
   ensurePeerJs() {
     if (typeof Peer === "undefined") {
-      alert("PeerJS failed to load. Check your network connection and reload the editor.");
+      this.setStatus("Live sessions are unavailable because PeerJS did not load. Check your connection and reload the editor.", "error");
       return false;
     }
     return true;
