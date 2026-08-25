@@ -70,6 +70,7 @@ const el = {
   objectSnapEnabledInput: document.getElementById("objectSnapEnabledInput"),
   buildSnapEnabledInput: document.getElementById("buildSnapEnabledInput"),
   gridSnapEnabledInput: document.getElementById("gridSnapEnabledInput"),
+  gridVisibleInput: document.getElementById("gridVisibleInput"),
   gridSizeInput: document.getElementById("gridSizeInput"),
   gridLineWidthInput: document.getElementById("gridLineWidthInput"),
   gridMajorVisibleInput: document.getElementById("gridMajorVisibleInput"),
@@ -146,10 +147,13 @@ const editorSettings = {
   objectSnapEnabled: true,
   buildModeSnapEnabled: true,
   gridSnapEnabled: true,
+  gridVisible: true,
   gridSize: 48,
   gridLineWidth: 1,
   gridMajorVisible: true,
   originAxesVisible: true,
+  uiShell: "new",
+  theme: "dark",
 };
 
 const mirrorState = {
@@ -1361,6 +1365,7 @@ function setup() {
   el.objectSnapEnabledInput.checked = editorSettings.objectSnapEnabled;
   el.buildSnapEnabledInput.checked = editorSettings.buildModeSnapEnabled;
   el.gridSnapEnabledInput.checked = editorSettings.gridSnapEnabled;
+  el.gridVisibleInput.checked = editorSettings.gridVisible;
   el.gridSizeInput.value = String(editorSettings.gridSize);
   el.gridLineWidthInput.value = String(editorSettings.gridLineWidth);
   el.gridMajorVisibleInput.checked = editorSettings.gridMajorVisible;
@@ -1370,6 +1375,8 @@ function setup() {
   el.towerHealthInput.max = String(GAME.TOWER_MAX_HEALTH);
   el.towerHealthInput.value = String(defaults.towerHealth);
   el.towerInvincibleInput.checked = defaults.towerInvincible;
+  const previewTheme = new URLSearchParams(window.location.search).get("theme");
+  globalThis.CosmowarUIShell?.setTheme(previewTheme === "light" || previewTheme === "dark" ? previewTheme : editorSettings.theme, false);
   resizeCanvas();
   if (!restoredViewFromSession) fitBoundaryInView();
   setMode("select");
@@ -1419,6 +1426,45 @@ function updateKeyboardPan(timestamp) {
 
 function requestRender() {
   needsRender = true;
+  syncNewShellUI();
+}
+
+function syncNewShellUI() {
+  const shell = document.getElementById?.("shellNew");
+  if (!shell) return;
+  const setText = (id, text) => {
+    const node = document.getElementById(id);
+    if (node) node.textContent = text;
+  };
+  setText("nextBombSiteValue", nextBombSiteLetter());
+  setText("holeVertexCount", String(interaction.holeDraft?.points?.length || 0));
+  const zoom = document.querySelector?.("#statusZoom span");
+  if (zoom) zoom.textContent = `${Math.round(view.scale * 100)}%`;
+  const gridChip = document.getElementById("statusGridSnap");
+  const objectChip = document.getElementById("statusObjectSnap");
+  gridChip?.classList.toggle("active", editorSettings.gridSnapEnabled);
+  objectChip?.classList.toggle("active", editorSettings.objectSnapEnabled);
+  gridChip?.setAttribute?.("aria-pressed", String(editorSettings.gridSnapEnabled));
+  objectChip?.setAttribute?.("aria-pressed", String(editorSettings.objectSnapEnabled));
+  const gridLabel = gridChip?.querySelector?.("span");
+  if (gridLabel) gridLabel.textContent = `Grid ${editorSettings.gridSize}`;
+  const objectProxy = document.getElementById("selectObjectSnapProxy");
+  const gridProxy = document.getElementById("selectGridSnapProxy");
+  if (objectProxy) objectProxy.checked = editorSettings.objectSnapEnabled;
+  if (gridProxy) gridProxy.checked = editorSettings.gridSnapEnabled;
+  const toggles = {
+    "grid-visible": editorSettings.gridVisible,
+    "grid-major": editorSettings.gridMajorVisible,
+    "origin-axes": editorSettings.originAxesVisible,
+    "grid-snap": editorSettings.gridSnapEnabled,
+    "object-snap": editorSettings.objectSnapEnabled,
+    "build-snap": editorSettings.buildModeSnapEnabled,
+  };
+  Object.entries(toggles).forEach(([action, enabled]) => {
+    const item = shell.querySelector?.(`[data-action="${action}"]`);
+    item?.classList.toggle("checked", enabled);
+    item?.setAttribute?.("aria-checked", String(enabled));
+  });
 }
 
 function queueRedraw() {
@@ -1502,6 +1548,12 @@ function savePanelLayout() {
 }
 
 function setPanelWidth(side, width) {
+  if (document.documentElement.dataset.uiShell === "new" && side === "right") {
+    const shellWidth = document.getElementById("shellNew")?.getBoundingClientRect().width || window.innerWidth;
+    const nextWidth = clamp(240, Math.round(width), Math.min(520, shellWidth - 520));
+    document.getElementById("shellNew")?.style.setProperty("--inspector-width", `${nextWidth}px`);
+    return nextWidth;
+  }
   if (!el.appShell) return width;
   const otherWidth = getPanelWidth(side === "left" ? "right" : "left");
   const shellWidth = el.appShell.getBoundingClientRect().width || window.innerWidth;
@@ -1513,6 +1565,9 @@ function setPanelWidth(side, width) {
 }
 
 function getPanelWidth(side) {
+  if (document.documentElement.dataset.uiShell === "new" && side === "right") {
+    return document.querySelector("#shellNew .inspector")?.getBoundingClientRect().width || 306;
+  }
   const node = side === "left" ? el.leftSidebar : el.rightSidebar;
   const fallback = side === "left" ? 280 : 330;
   return node?.getBoundingClientRect().width || fallback;
@@ -1615,6 +1670,12 @@ function bindUI() {
     el.gridLineWidthInput.value = String(editorSettings.gridLineWidth);
     saveSession();
     setActionState(`Grid line thickness: ${editorSettings.gridLineWidth}`, "success", true);
+    requestRender();
+  });
+  el.gridVisibleInput.addEventListener("change", () => {
+    editorSettings.gridVisible = el.gridVisibleInput.checked;
+    saveSession();
+    setActionState(`Grid ${editorSettings.gridVisible ? "shown" : "hidden"}`, "success", true);
     requestRender();
   });
   el.gridMajorVisibleInput.addEventListener("change", () => {
@@ -1768,7 +1829,14 @@ function toolLabel(mode) {
 }
 
 function updateToolButtons() {
-  el.toolButtons.forEach((button) => button.classList.toggle("active", button.dataset.tool === interaction.mode));
+  el.toolButtons.forEach((button) => {
+    const active = button.dataset.tool === interaction.mode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  document.querySelectorAll("#shellNew [data-tool-options]").forEach((panel) => {
+    panel.hidden = panel.dataset.toolOptions !== interaction.mode;
+  });
 }
 
 function updateCursor() {
@@ -2131,6 +2199,51 @@ function onKeyDown(event) {
     if (deleteSelectedMirrorAxis()) return;
     deleteSelected();
   }
+
+  const newShellActive = editorSettings.uiShell === "new" && document.documentElement.dataset.uiShell !== "current";
+  if (newShellActive && !isTypingInFormControl()) {
+    const toolShortcuts = {
+      "1": "select",
+      "2": "boundary",
+      "3": "hole",
+      "4": "build",
+      "5": "spawn",
+      "6": "bomb",
+      "7": "mirror",
+    };
+    if (!mod && !event.altKey && toolShortcuts[key]) {
+      event.preventDefault();
+      setMode(toolShortcuts[key]);
+      return;
+    }
+    if (!mod && !event.altKey && key === "l") {
+      event.preventDefault();
+      globalThis.CosmowarUIShell?.toggleLibrary();
+      return;
+    }
+    if (!mod && !event.altKey && key === "g") {
+      event.preventDefault();
+      el.gridVisibleInput.checked = !el.gridVisibleInput.checked;
+      el.gridVisibleInput.dispatchEvent(new Event("change", { bubbles: true }));
+      return;
+    }
+    if (!mod && !event.altKey && key === "f") {
+      event.preventDefault();
+      fitBoundaryInView();
+      setActionState("Zoomed to fit map", "success", true);
+      return;
+    }
+    if (!mod && !event.altKey && (event.key === "?" || (event.shiftKey && key === "/"))) {
+      event.preventDefault();
+      globalThis.CosmowarUIShell?.openShortcuts();
+      return;
+    }
+    if (mod && key === ",") {
+      event.preventDefault();
+      setSettingsOpen(true);
+      return;
+    }
+  }
 }
 
 function onKeyUp(event) {
@@ -2172,7 +2285,8 @@ function updateCursorCoordinates() {
   const x = roundTo(interaction.mouseWorld.x, 1);
   const y = roundTo(interaction.mouseWorld.y, 1);
   el.cursorCoordinates.textContent = `X ${x}  Y ${y}`;
-  el.cursorCoordinates.classList.toggle("hidden", interaction.mode !== "build");
+  const newShellActive = document.documentElement.dataset.uiShell === "new";
+  el.cursorCoordinates.classList.toggle("hidden", !newShellActive && interaction.mode !== "build");
 }
 
 function screenToWorld(screenX, screenY) {
@@ -3542,7 +3656,10 @@ function renderCustomShapes() {
   }
   customShapes.forEach((shape) => {
     const card = document.createElement("div");
-    card.className = "custom-shape-card";
+    card.className = "shape custom-shape-card";
+    const thumb = document.createElement("span");
+    thumb.className = "shape-thumb";
+    thumb.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-shapes"></use></svg>';
     const use = document.createElement("button");
     use.type = "button";
     use.className = "custom-shape-use";
@@ -3550,17 +3667,20 @@ function renderCustomShapes() {
     title.textContent = shape.name;
     const meta = document.createElement("span");
     const count = getClipboardObjectCount(shape.clipboard);
-    meta.textContent = `${count} object${count === 1 ? "" : "s"} · click to place`;
+    meta.className = "shape-meta";
+    title.className = "shape-name";
+    meta.textContent = `${count} object${count === 1 ? "" : "s"}`;
     use.appendChild(title);
     use.appendChild(meta);
     use.addEventListener("click", () => useCustomShape(shape.id));
     const remove = document.createElement("button");
     remove.type = "button";
-    remove.className = "custom-shape-delete";
+    remove.className = "shape-del custom-shape-delete";
     remove.title = `Delete ${shape.name}`;
     remove.setAttribute?.("aria-label", `Delete ${shape.name}`);
-    remove.textContent = "×";
+    remove.innerHTML = '<svg class="ico sm" aria-hidden="true"><use href="#i-trash"></use></svg>';
     remove.addEventListener("click", () => deleteCustomShape(shape.id));
+    card.appendChild(thumb);
     card.appendChild(use);
     card.appendChild(remove);
     el.customShapesList.appendChild(card);
@@ -3962,7 +4082,19 @@ function clearSelection() {
 }
 
 function selectionTypeRow(label) {
-  return `<label class="field"><span>Object</span><span class="readonly-tag">${label}</span></label>`;
+  return `<div class="inspector-object-title"><span>Selected object</span><strong>${label}</strong></div>`;
+}
+
+function inspectorSection(title, content, className = "") {
+  return `<section class="sect ${className}"><h3 class="sect-title">${title}</h3><div class="rows">${content}</div></section>`;
+}
+
+function inspectorField(label, control) {
+  return `<div class="row"><span class="row-label">${label}</span>${control}</div>`;
+}
+
+function inspectorPositionFields(xId, yId, x, y) {
+  return `<div class="pair"><label><span class="sr">X coordinate</span><input id="${xId}" type="number" step="0.1" value="${x}" aria-label="X coordinate"></label><label><span class="sr">Y coordinate</span><input id="${yId}" type="number" step="0.1" value="${y}" aria-label="Y coordinate"></label></div>`;
 }
 
 function teamSwatchMarkup(team, includeNeutral = true) {
@@ -3993,9 +4125,10 @@ function bindTeamSwatchGroup(container, currentTeam, onChange) {
 
 function snapToggleMarkup() {
   return `
-    <label class="checkbox-field">
+    <label class="switch">
       <input id="selSnapEnabled" type="checkbox" ${editorSettings.objectSnapEnabled ? "checked" : ""}>
-      <span>Enable object snapping</span>
+      <span class="switch-track"></span>
+      <span>Object snapping</span>
     </label>
   `;
 }
@@ -4028,7 +4161,9 @@ function renderSelectionPanel() {
   const entries = getSelectionEntries();
   if (el.saveCustomShapeBtn) el.saveCustomShapeBtn.disabled = entries.length === 0;
   if (entries.length === 0) {
-    el.selectionPanel.innerHTML = `<p class="muted">No selection yet.</p>`;
+    const objectCount = state.map_boundaries.length + state.map_holes.length + state.spawn_points.length
+      + state.bomb_sites.length + state.towers.length + state.walls.length + state.structures.length;
+    el.selectionPanel.innerHTML = `<div class="empty"><svg class="ico" aria-hidden="true"><use href="#i-selection-plus"></use></svg><p>Nothing selected</p><span class="hint">Select an object on the canvas to inspect it.</span></div>${inspectorSection("Map summary", `${inspectorField("Objects", `<span class="readonly">${objectCount}</span>`)}${inspectorField("Towers", `<span class="readonly">${state.towers.length}</span>`)}${inspectorField("Bomb sites", `<span class="readonly">${state.bomb_sites.length}</span>`)}`)}`;
     return;
   }
   if (entries.length > 1) {
@@ -4049,31 +4184,17 @@ function renderSelectionPanel() {
 function renderMultiSelection(entries) {
   const towerEntries = entries.filter((entry) => entry.type === "tower");
   const teamEditable = entries.filter((entry) => ["tower", "spawn", "wall", "structure"].includes(entry.type));
+  const counts = entries.reduce((result, entry) => {
+    result[entry.type] = (result[entry.type] || 0) + 1;
+    return result;
+  }, {});
   el.selectionPanel.innerHTML = `
     ${selectionTypeRow("Multi Selection")}
-    <label class="field"><span>Selected Count</span><span class="readonly-tag">${entries.length}</span></label>
-    <p class="muted" style="margin-bottom:8px;">Mass edit properties for selected entities.</p>
-    ${teamEditable.length ? `
-      <label class="field">
-        <span>Apply team to compatible objects</span>
-      </label>
-      ${teamSwatchMarkup(0, true)}
-      <button id="applyMultiTeam" class="action-button">Apply Team</button>
-    ` : ""}
-    ${towerEntries.length ? `
-      <label class="field">
-        <span>Set health for ${towerEntries.length} selected tower${towerEntries.length === 1 ? "" : "s"}</span>
-        <input id="multiTowerHealth" type="number" step="1" min="1" max="${GAME.TOWER_MAX_HEALTH}" value="${GAME.TOWER_MAX_HEALTH}">
-      </label>
-      <label class="checkbox-field">
-        <input id="multiTowerInvincible" type="checkbox">
-        <span>Set selected towers invincible</span>
-      </label>
-      ${towerEntries.length !== entries.length ? `<p class="muted" style="margin-bottom:8px;">Non-tower objects in this selection are left unchanged.</p>` : ""}
-      <button id="applyMultiTowerProps" class="action-button secondary">Apply Tower Properties</button>
-    ` : ""}
-    ${snapToggleMarkup()}
-    <button id="deleteMultiBtn" class="danger-button">Delete Selection</button>
+    ${inspectorSection("Contents", `${inspectorField("Selected", `<span class="readonly">${entries.length}</span>`)}${Object.entries(counts).map(([type, count]) => inspectorField(type === "holeVertex" ? "Vertices" : `${type[0].toUpperCase()}${type.slice(1)}s`, `<span class="readonly">${count}</span>`)).join("")}`)}
+    ${teamEditable.length ? inspectorSection("Apply to all", `${teamSwatchMarkup(0, true)}<button id="applyMultiTeam" class="btn primary wide">Apply team</button>`) : ""}
+    ${towerEntries.length ? inspectorSection("Towers only", `${inspectorField("Health", `<input id="multiTowerHealth" type="number" step="1" min="1" max="${GAME.TOWER_MAX_HEALTH}" value="${GAME.TOWER_MAX_HEALTH}">`)}${inspectorField("Invincible", `<label class="switch"><input id="multiTowerInvincible" type="checkbox"><span class="switch-track"></span></label>`)}${towerEntries.length !== entries.length ? '<p class="muted">Other selected objects are left unchanged.</p>' : ""}<button id="applyMultiTowerProps" class="btn wide">Apply tower properties</button>`) : ""}
+    ${inspectorSection("Snapping", snapToggleMarkup())}
+    ${inspectorSection("Danger zone", '<button id="deleteMultiBtn" class="btn danger wide">Delete selection</button>', "destructive")}
   `;
   bindSnapToggle();
   const applyTeam = document.getElementById("applyMultiTeam");
@@ -4128,14 +4249,10 @@ function renderTowerSelection(entry) {
   const tower = entry.item;
   el.selectionPanel.innerHTML = `
     ${selectionTypeRow("Tower")}
-    <label class="field"><span>Team</span></label>
-    ${teamSwatchMarkup(tower.team_id, true)}
-    <label class="field"><span>x</span><input id="selTowerX" type="number" step="0.1" value="${tower.x}"></label>
-    <label class="field"><span>y</span><input id="selTowerY" type="number" step="0.1" value="${tower.y}"></label>
-    <label class="field"><span>health</span><input id="selTowerHealth" type="number" step="1" max="${GAME.TOWER_MAX_HEALTH}" min="1" value="${tower.health}"></label>
-    <label class="checkbox-field"><input id="selTowerInv" type="checkbox" ${tower.is_invincible ? "checked" : ""}><span>is_invincible</span></label>
-    ${snapToggleMarkup()}
-    <button id="deleteTowerBtn" class="danger-button">Delete Tower</button>
+    ${inspectorSection("Position", inspectorPositionFields("selTowerX", "selTowerY", tower.x, tower.y))}
+    ${inspectorSection("Appearance", teamSwatchMarkup(tower.team_id, true))}
+    ${inspectorSection("Properties", `${inspectorField("Health", `<input id="selTowerHealth" type="number" step="1" max="${GAME.TOWER_MAX_HEALTH}" min="1" value="${tower.health}">`)}${inspectorField("Invincible", `<label class="switch"><input id="selTowerInv" type="checkbox" ${tower.is_invincible ? "checked" : ""}><span class="switch-track"></span></label>`)}${inspectorField("Snapping", snapToggleMarkup())}`)}
+    ${inspectorSection("Danger zone", '<button id="deleteTowerBtn" class="btn danger wide">Delete tower</button>', "destructive")}
   `;
   bindTeamSwatchGroup(el.selectionPanel, tower.team_id, (nextTeam) => withAction("EDIT_TOWER", () => setConnectedComponentTeam(tower.id, nextTeam)));
   bindNumericChange("selTowerX", (v) => withAction("MOVE_TOWER", () => { tower.x = roundTo(v, 3); return true; }));
@@ -4150,12 +4267,10 @@ function renderSpawnSelection(entry) {
   const spawn = entry.item;
   el.selectionPanel.innerHTML = `
     ${selectionTypeRow("Spawn")}
-    <label class="field"><span>Team</span></label>
-    ${teamSwatchMarkup(spawn.team_id, false)}
-    <label class="field"><span>x</span><input id="selSpawnX" type="number" step="0.1" value="${spawn.x}"></label>
-    <label class="field"><span>y</span><input id="selSpawnY" type="number" step="0.1" value="${spawn.y}"></label>
-    ${snapToggleMarkup()}
-    <button id="deleteSpawnBtn" class="danger-button">Delete Spawn</button>
+    ${inspectorSection("Position", inspectorPositionFields("selSpawnX", "selSpawnY", spawn.x, spawn.y))}
+    ${inspectorSection("Appearance", teamSwatchMarkup(spawn.team_id, false))}
+    ${inspectorSection("Properties", inspectorField("Snapping", snapToggleMarkup()))}
+    ${inspectorSection("Danger zone", '<button id="deleteSpawnBtn" class="btn danger wide">Delete spawn</button>', "destructive")}
   `;
   bindTeamSwatchGroup(el.selectionPanel, spawn.team_id, (nextTeam) => {
     const duplicate = state.spawn_points.find((p) => p.uid !== spawn.uid && p.team_id === nextTeam);
@@ -4176,18 +4291,10 @@ function renderBombSelection(entry) {
   const bomb = entry.item;
   el.selectionPanel.innerHTML = `
     ${selectionTypeRow("Bomb Site")}
-    <label class="field"><span>site_letter</span><input id="selBombLetter" type="text" maxlength="3" value="${bomb.site_letter}"></label>
-    <label class="field"><span>x</span><input id="selBombX" type="number" step="0.1" value="${bomb.x}"></label>
-    <label class="field"><span>y</span><input id="selBombY" type="number" step="0.1" value="${bomb.y}"></label>
-    ${snapToggleMarkup()}
-    <button id="deleteBombBtn" class="danger-button">Delete Bomb Site</button>
+    ${inspectorSection("Position", inspectorPositionFields("selBombX", "selBombY", bomb.x, bomb.y))}
+    ${inspectorSection("Properties", `${inspectorField("Site", `<span class="letter-chip">${bomb.site_letter}</span>`)}${inspectorField("Snapping", snapToggleMarkup())}`)}
+    ${inspectorSection("Danger zone", '<button id="deleteBombBtn" class="btn danger wide">Delete bomb site</button>', "destructive")}
   `;
-  document.getElementById("selBombLetter").addEventListener("change", (e) => {
-    const value = String(e.target.value || "").trim().toUpperCase();
-    if (!value) { renderSelectionPanel(); return; }
-    withAction("EDIT_BOMB", () => { bomb.site_letter = value; return true; });
-    renderSelectionPanel();
-  });
   bindNumericChange("selBombX", (v) => withAction("MOVE_BOMB", () => { bomb.x = roundTo(v, 3); return true; }));
   bindNumericChange("selBombY", (v) => withAction("MOVE_BOMB", () => { bomb.y = roundTo(v, 3); return true; }));
   bindSnapToggle();
@@ -4201,12 +4308,9 @@ function renderWallSelection(entry) {
   const length = a && b ? distance(a.x, a.y, b.x, b.y) : 0;
   el.selectionPanel.innerHTML = `
     ${selectionTypeRow("Wall")}
-    <label class="field"><span>Wall</span><span class="readonly-tag">Connected Towers</span></label>
-    <label class="field"><span>Length</span><span class="readonly-tag">${Math.round(length)} units</span></label>
-    <label class="field"><span>Team</span></label>
-    ${teamSwatchMarkup(wall.team_id, true)}
-    ${snapToggleMarkup()}
-    <button id="deleteWallBtn" class="danger-button">Delete Wall</button>
+    ${inspectorSection("Appearance", teamSwatchMarkup(wall.team_id, true))}
+    ${inspectorSection("Properties", `${inspectorField("Type", '<span class="readonly">Connected towers</span>')}${inspectorField("Length", `<span class="readonly">${Math.round(length)} units</span>`)}${inspectorField("Snapping", snapToggleMarkup())}`)}
+    ${inspectorSection("Danger zone", '<button id="deleteWallBtn" class="btn danger wide">Delete wall</button>', "destructive")}
   `;
   bindTeamSwatchGroup(el.selectionPanel, wall.team_id, (nextTeam) => withAction("EDIT_WALL", () => setConnectedComponentTeam(wall.t1, nextTeam)));
   bindSnapToggle();
@@ -4217,11 +4321,9 @@ function renderBoundarySelection(entry) {
   const point = entry.item;
   el.selectionPanel.innerHTML = `
     ${selectionTypeRow("Boundary Vertex")}
-    <label class="field"><span>Boundary point</span><span class="readonly-tag">${point.uid}</span></label>
-    <label class="field"><span>x</span><input id="selBoundaryX" type="number" step="0.1" value="${point.x}"></label>
-    <label class="field"><span>y</span><input id="selBoundaryY" type="number" step="0.1" value="${point.y}"></label>
-    ${snapToggleMarkup()}
-    <button id="deleteBoundaryBtn" class="danger-button">Delete Vertex</button>
+    ${inspectorSection("Position", inspectorPositionFields("selBoundaryX", "selBoundaryY", point.x, point.y))}
+    ${inspectorSection("Properties", `${inspectorField("Point", `<span class="readonly">${point.uid}</span>`)}${inspectorField("Snapping", snapToggleMarkup())}`)}
+    ${inspectorSection("Danger zone", '<button id="deleteBoundaryBtn" class="btn danger wide">Delete vertex</button>', "destructive")}
   `;
   bindNumericChange("selBoundaryX", (v) => withAction("MOVE_BOUNDARY", () => { point.x = roundTo(v, 3); return true; }));
   bindNumericChange("selBoundaryY", (v) => withAction("MOVE_BOUNDARY", () => { point.y = roundTo(v, 3); return true; }));
@@ -4235,11 +4337,9 @@ function renderHoleSelection(entry) {
   const center = getHoleCenter(hole);
   el.selectionPanel.innerHTML = `
     ${selectionTypeRow(`Map Hole ${index}`)}
-    <label class="field"><span>Vertices</span><span class="readonly-tag">${hole.points.length}</span></label>
-    <label class="field"><span>centre x</span><input id="selHoleX" type="number" step="0.1" value="${roundTo(center.x, 3)}"></label>
-    <label class="field"><span>centre y</span><input id="selHoleY" type="number" step="0.1" value="${roundTo(center.y, 3)}"></label>
-    ${snapToggleMarkup()}
-    <button id="deleteHoleBtn" class="danger-button">Delete Hole</button>
+    ${inspectorSection("Position", inspectorPositionFields("selHoleX", "selHoleY", roundTo(center.x, 3), roundTo(center.y, 3)))}
+    ${inspectorSection("Properties", `${inspectorField("Vertices", `<span class="readonly">${hole.points.length}</span>`)}${inspectorField("Snapping", snapToggleMarkup())}`)}
+    ${inspectorSection("Danger zone", '<button id="deleteHoleBtn" class="btn danger wide">Delete hole</button>', "destructive")}
   `;
   bindNumericChange("selHoleX", (value) => withAction("MOVE_HOLE", () => { moveHoleTo(hole, value, getHoleCenter(hole).y); return true; }));
   bindNumericChange("selHoleY", (value) => withAction("MOVE_HOLE", () => { moveHoleTo(hole, getHoleCenter(hole).x, value); return true; }));
@@ -4254,12 +4354,9 @@ function renderHoleVertexSelection(entry) {
   const pointIndex = hole.points.indexOf(point);
   el.selectionPanel.innerHTML = `
     ${selectionTypeRow("Hole Vertex")}
-    <label class="field"><span>Location</span><span class="readonly-tag">Hole ${holeIndex}, vertex ${pointIndex}</span></label>
-    <label class="field"><span>x</span><input id="selHoleVertexX" type="number" step="0.1" value="${point.x}"></label>
-    <label class="field"><span>y</span><input id="selHoleVertexY" type="number" step="0.1" value="${point.y}"></label>
-    ${snapToggleMarkup()}
-    <button id="deleteHoleVertexBtn" class="danger-button">Delete Vertex</button>
-    <button id="deleteParentHoleBtn" class="danger-button">Delete Entire Hole</button>
+    ${inspectorSection("Position", inspectorPositionFields("selHoleVertexX", "selHoleVertexY", point.x, point.y))}
+    ${inspectorSection("Properties", `${inspectorField("Location", `<span class="readonly">Hole ${holeIndex}, vertex ${pointIndex}</span>`)}${inspectorField("Snapping", snapToggleMarkup())}`)}
+    ${inspectorSection("Danger zone", '<button id="deleteHoleVertexBtn" class="btn danger wide">Delete vertex</button><button id="deleteParentHoleBtn" class="btn danger wide">Delete entire hole</button>', "destructive")}
   `;
   bindNumericChange("selHoleVertexX", (value) => withAction("EDIT_HOLE_VERTEX", () => { point.x = roundTo(value, 3); return true; }));
   bindNumericChange("selHoleVertexY", (value) => withAction("EDIT_HOLE_VERTEX", () => { point.y = roundTo(value, 3); return true; }));
@@ -4276,14 +4373,10 @@ function renderStructureSelection(entry) {
   const s = entry.item;
   el.selectionPanel.innerHTML = `
     ${selectionTypeRow("Structure")}
-    <label class="field"><span>Structure</span><span class="readonly-tag">${s.id}</span></label>
-    <label class="field"><span>Team</span></label>
-    ${teamSwatchMarkup(s.team_id, true)}
-    <label class="field"><span>x</span><input id="selStructureX" type="number" step="0.1" value="${s.x}"></label>
-    <label class="field"><span>y</span><input id="selStructureY" type="number" step="0.1" value="${s.y}"></label>
-    <label class="field"><span>size</span><input id="selStructureSize" type="number" step="1" value="${s.size}"></label>
-    ${snapToggleMarkup()}
-    <button id="deleteStructureBtn" class="danger-button">Delete Structure</button>
+    ${inspectorSection("Position", inspectorPositionFields("selStructureX", "selStructureY", s.x, s.y))}
+    ${inspectorSection("Appearance", teamSwatchMarkup(s.team_id, true))}
+    ${inspectorSection("Properties", `${inspectorField("ID", `<span class="readonly">${s.id}</span>`)}${inspectorField("Size", `<input id="selStructureSize" type="number" step="1" value="${s.size}">`)}${inspectorField("Snapping", snapToggleMarkup())}`)}
+    ${inspectorSection("Danger zone", '<button id="deleteStructureBtn" class="btn danger wide">Delete structure</button>', "destructive")}
   `;
   bindTeamSwatchGroup(el.selectionPanel, s.team_id, (nextTeam) => withAction("EDIT_STRUCTURE", () => { s.team_id = nextTeam; return true; }));
   bindNumericChange("selStructureX", (v) => withAction("MOVE_STRUCTURE", () => { s.x = roundTo(v, 3); return true; }));
@@ -4514,6 +4607,9 @@ function restoreSavedSession() {
     if (typeof saved?.editorSettings?.gridSnapEnabled === "boolean") {
       editorSettings.gridSnapEnabled = saved.editorSettings.gridSnapEnabled;
     }
+    if (typeof saved?.editorSettings?.gridVisible === "boolean") {
+      editorSettings.gridVisible = saved.editorSettings.gridVisible;
+    }
     if (Number.isFinite(saved?.editorSettings?.gridSize)) {
       editorSettings.gridSize = clamp(4, Number(saved.editorSettings.gridSize), 1000);
     }
@@ -4525,6 +4621,12 @@ function restoreSavedSession() {
     }
     if (typeof saved?.editorSettings?.originAxesVisible === "boolean") {
       editorSettings.originAxesVisible = saved.editorSettings.originAxesVisible;
+    }
+    if (saved?.editorSettings?.uiShell === "new" || saved?.editorSettings?.uiShell === "current") {
+      editorSettings.uiShell = saved.editorSettings.uiShell;
+    }
+    if (saved?.editorSettings?.theme === "dark" || saved?.editorSettings?.theme === "light") {
+      editorSettings.theme = saved.editorSettings.theme;
     }
     if (Number.isFinite(saved?.view?.scale) && Number.isFinite(saved?.view?.offsetX) && Number.isFinite(saved?.view?.offsetY)) {
       view.scale = clamp(GAME.MIN_ZOOM, Number(saved.view.scale), GAME.MAX_ZOOM);
@@ -4798,8 +4900,7 @@ function updateInvalidObjectWarning() {
   invalidObjectWarningCount = count;
   if (report.issues.length <= 0) {
     if (previousCount > 0 && el.actionState.classList.contains("warn")) {
-      el.actionState.textContent = "Idle";
-      el.actionState.className = "action-state idle";
+      setActionState("Idle", "idle");
     }
     return false;
   }
@@ -4814,7 +4915,7 @@ function draw() {
   activeLiveMirrorPreviewModel = buildActiveLiveMirrorPreviewModel();
   ctx.fillStyle = COLORS.bg;
   ctx.fillRect(0, 0, viewport.width, viewport.height);
-  drawGrid();
+  if (editorSettings.gridVisible) drawGrid();
   drawMirrorAxes();
   drawBoundaryFogMask();
   drawHoles();
@@ -7444,13 +7545,21 @@ function setActionState(text, tone = "idle", autoReset = false) {
     clearTimeout(actionTimer);
     actionTimer = null;
   }
-  el.actionState.textContent = text;
-  el.actionState.className = `action-state ${tone}`;
+  const targets = Array.from(document.querySelectorAll("[data-action-state]"));
+  if (!targets.length && el.actionState) targets.push(el.actionState);
+  targets.forEach((target) => {
+    target.textContent = text;
+    target.classList.remove("idle", "success", "warn", "error");
+    target.classList.add("action-state", tone);
+  });
   if (autoReset) {
     actionTimer = setTimeout(() => {
       if (!updateInvalidObjectWarning()) {
-        el.actionState.textContent = "Idle";
-        el.actionState.className = "action-state idle";
+        targets.forEach((target) => {
+          target.textContent = "Idle";
+          target.classList.remove("success", "warn", "error");
+          target.classList.add("action-state", "idle");
+        });
       }
       actionTimer = null;
     }, 2200);
@@ -7950,6 +8059,68 @@ function createInitialState() {
 function ensureDefaultBoundary() {
   if (state.map_boundaries.length) return;
   state.map_boundaries = getMapPresetPoints("square", 4000, 4000).map((point) => ({ uid: createUid("boundary"), ...point }));
+}
+
+function selectMatchingSelection() {
+  const source = getSelectionEntries()[0];
+  if (!source) {
+    setActionState("Select an object first", "warn", true);
+    return false;
+  }
+  const candidates = source.type === "hole"
+    ? state.map_holes.map((item) => ({ type: "hole", item, key: makeKey("hole", item.uid) }))
+    : getSelectableEntries().filter((entry) => entry.type === source.type);
+  const matching = candidates.filter((entry) => objectsMatchForBatchSelection(source, entry));
+  selection.clear();
+  matching.forEach((entry) => selection.add(entry.key));
+  renderSelectionPanel();
+  setActionState(`Selected ${matching.length} matching ${matching.length === 1 ? "object" : "objects"}`, "success", true);
+  requestRender();
+  return true;
+}
+
+function createNewMapFromMenu() {
+  if (typeof confirm === "function" && !confirm("Create a new map? Unsaved map changes will be replaced.")) return false;
+  const changed = withAction("NEW_MAP", () => {
+    state = createInitialState();
+    ensureDefaultBoundary();
+    selection.clear();
+    mirrorState.axes = [];
+    interaction.selectedMirrorAxisIndex = null;
+    return true;
+  });
+  fitBoundaryInView();
+  renderSelectionPanel();
+  updateMirrorStatus();
+  setActionState("New map created", "success", true);
+  return changed;
+}
+
+if (!globalThis.__COSMOWAR_EDITOR_TEST__) {
+  globalThis.CosmowarEditorUI = {
+    setShell(shell) {
+      editorSettings.uiShell = shell === "current" ? "current" : "new";
+      saveSession();
+    },
+    setTheme(theme) {
+      editorSettings.theme = theme === "light" ? "light" : "dark";
+      saveSession();
+    },
+    newMap: createNewMapFromMenu,
+    undo: undoAction,
+    redo: redoAction,
+    copy: copySelectionToClipboard,
+    paste: startPasteDraft,
+    delete: deleteSelected,
+    selectMatching: selectMatchingSelection,
+    fit() {
+      fitBoundaryInView();
+      setActionState("Zoomed to fit map", "success", true);
+    },
+    cancelDraft() {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    },
+  };
 }
 
 if (globalThis.__COSMOWAR_EDITOR_TEST__) {
