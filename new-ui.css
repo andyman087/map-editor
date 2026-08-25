@@ -877,7 +877,9 @@
   .library-body { min-height: 0; padding: 12px; overflow-y: auto; }
   .library-name { display: grid; gap: 5px; margin-bottom: 8px; color: var(--text-2); }
   .shape-list { margin-top: 10px; }
-  .custom-shape-card { cursor: default; }
+  .custom-shape-card { grid-template-columns: 44px minmax(0, 1fr) 26px; cursor: default; }
+  .custom-shape-card .shape-thumb { width: 44px; height: 44px; overflow: hidden; background: var(--field-bg); }
+  .custom-shape-card .shape-thumb canvas { display: block; width: 100%; height: 100%; }
   .custom-shape-use { display: grid; gap: 2px; min-width: 0; margin: 0; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
   .custom-shape-use:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
   .custom-shape-use .shape-name { color: var(--text); }
@@ -903,10 +905,16 @@
   .settings-layout > nav { display: flex; flex-direction: column; gap: 2px; padding: 10px; border-right: 1px solid var(--line); }
   .settings-tab { display: flex; align-items: center; gap: 8px; padding: 8px 9px; border: 0; border-radius: 5px; background: transparent; color: var(--text-2); text-align: left; cursor: pointer; }
   .settings-tab.active { background: var(--accent-wash); color: var(--accent); }
-  .settings-content { padding: 18px; overflow-y: auto; }
+  .settings-content { min-width: 0; padding: 18px; overflow-x: hidden; overflow-y: auto; }
+  .settings-content > section { min-width: 0; }
   .settings-content h3 { margin: 0 0 3px; }
   .settings-content > section > p { margin: 0 0 18px; color: var(--text-2); }
   .settings-row { display: grid; grid-template-columns: minmax(0, 1fr) 150px; align-items: center; gap: 18px; padding: 11px 0; border-bottom: 1px solid var(--line); }
+  .settings-row > div { min-width: 0; }
+  .settings-row input,
+  .settings-row select,
+  .settings-row button { max-width: 100%; }
+  #hostSessionBtn { width: 100%; min-height: 30px; padding-block: 4px; white-space: normal; line-height: 1.25; }
   .settings-row strong,
   .settings-row span { display: block; }
   .settings-row span { color: var(--text-3); font-size: 12px; }

@@ -609,6 +609,30 @@ test("grid and view settings survive a restored session", () => {
 
 });
 
+test("regular grid, major lines, and origin axes remain independently visible", () => {
+  const editor = loadEditor();
+  editor.updateSettings({ gridVisible: false, gridMajorVisible: true, originAxesVisible: true }, false);
+  assert.equal(JSON.stringify(editor.getGridLayerVisibility()), JSON.stringify({ regular: false, major: true, origin: true }));
+
+  editor.updateSettings({ gridVisible: true, gridMajorVisible: false, originAxesVisible: false }, false);
+  assert.equal(JSON.stringify(editor.getGridLayerVisibility()), JSON.stringify({ regular: true, major: false, origin: false }));
+});
+
+test("light canvas theme changes drawing colours and clean export bounds follow the map boundary", () => {
+  const editor = loadEditor();
+  editor.importState(baseMap({
+    map_holes: [squareHole],
+    towers: [{ id: 1, team_id: 0, x: 2000, y: 1500, health: 4, is_invincible: false }],
+  }));
+  const light = editor.setCanvasTheme("light");
+  assert.equal(light.bg, "#F7F9FB");
+  assert.equal(light.boundary, "#8895A5");
+  assert.equal(JSON.stringify(editor.getCleanRenderBounds()), JSON.stringify({ minX: 0, minY: 0, maxX: 4000, maxY: 3000, width: 4000, height: 3000 }));
+
+  const dark = editor.setCanvasTheme("dark");
+  assert.equal(dark.bg, "#0D0F17");
+});
+
 test("centering on 0,0 translates the complete authored map and supports undo", () => {
   const editor = loadEditor();
   editor.importState({

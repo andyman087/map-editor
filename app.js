@@ -27,6 +27,7 @@ const COLORS = {
   boundary: "#2E3842",
   boundaryFog: "rgba(2, 6, 14, 0.62)",
   holeRim: "#2E3842",
+  originAxis: "#7C95AA",
   blue: "#3D5DFF",
   red: "#FF3D3D",
   neutral: "#667380",
@@ -34,6 +35,29 @@ const COLORS = {
   warn: "#FFC857",
   danger: "#FF6B6B",
   concrete: "#6A7D98",
+};
+
+const CANVAS_THEME_COLORS = {
+  dark: {
+    bg: "#0D0F17",
+    terrain: "#0D0F17",
+    gridMinor: "#2E3842",
+    gridMajor: "#526679",
+    boundary: "#2E3842",
+    boundaryFog: "rgba(2, 6, 14, 0.62)",
+    holeRim: "#2E3842",
+    originAxis: "#7C95AA",
+  },
+  light: {
+    bg: "#F7F9FB",
+    terrain: "#F7F9FB",
+    gridMinor: "#DCE3EA",
+    gridMajor: "#B8C4D1",
+    boundary: "#8895A5",
+    boundaryFog: "rgba(151, 163, 178, 0.38)",
+    holeRim: "#8895A5",
+    originAxis: "#687C91",
+  },
 };
 
 const TEAM_COLORS = { "-1": COLORS.neutral, "0": COLORS.blue, "1": COLORS.red };
@@ -120,6 +144,7 @@ const el = {
   cursorCoordinates: document.getElementById("cursorCoordinates"),
   actionState: document.getElementById("actionState"),
   exportBtn: document.getElementById("exportBtn"),
+  exportImageBtn: document.getElementById("exportImageBtn"),
   importBtn: document.getElementById("importBtn"),
   importFileInput: document.getElementById("importFileInput"),
 };
@@ -1518,7 +1543,9 @@ function setup() {
   el.towerInvincibleInput.checked = defaults.towerInvincible;
   syncDefaultTowerHealthAvailability();
   const previewTheme = new URLSearchParams(window.location.search).get("theme");
-  globalThis.CosmowarUIShell?.setTheme(previewTheme === "light" || previewTheme === "dark" ? previewTheme : editorSettings.theme, false);
+  const initialTheme = previewTheme === "light" || previewTheme === "dark" ? previewTheme : editorSettings.theme;
+  applyCanvasTheme(initialTheme);
+  globalThis.CosmowarUIShell?.setTheme(initialTheme, false);
   resizeCanvas();
   if (!restoredViewFromSession) fitBoundaryInView();
   setMode("select");
@@ -1571,6 +1598,13 @@ function requestRender() {
   syncNewShellUI();
 }
 
+function applyCanvasTheme(theme) {
+  const next = theme === "light" ? "light" : "dark";
+  editorSettings.theme = next;
+  Object.assign(COLORS, CANVAS_THEME_COLORS[next]);
+  requestRender();
+}
+
 function syncNewShellUI() {
   const shell = document.getElementById?.("shellNew");
   if (!shell) return;
@@ -1608,7 +1642,6 @@ function syncNewShellUI() {
     item?.classList.toggle("checked", enabled);
     item?.setAttribute?.("aria-checked", String(enabled));
   });
-  shell.querySelectorAll?.("[data-grid-dependent]").forEach((item) => { item.hidden = !editorSettings.gridVisible; });
 }
 
 function queueRedraw() {
@@ -1885,6 +1918,7 @@ function bindUI() {
   el.settingsCloseBtn.addEventListener("click", () => setSettingsOpen(false));
 
   el.exportBtn.addEventListener("click", exportJSON);
+  el.exportImageBtn?.addEventListener("click", exportMapImage);
   el.importBtn.addEventListener("click", () => el.importFileInput.click());
   el.importFileInput.addEventListener("change", importMap);
 
@@ -3833,7 +3867,17 @@ function renderCustomShapes() {
     card.className = "shape custom-shape-card";
     const thumb = document.createElement("span");
     thumb.className = "shape-thumb";
-    thumb.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-shapes"></use></svg>';
+    const preview = document.createElement("canvas");
+    preview.setAttribute?.("aria-hidden", "true");
+    preview.title = `${shape.name} preview`;
+    renderCleanSceneToCanvas(preview, createClipboardRenderScene(shape.clipboard), {
+      width: 88,
+      height: 88,
+      padding: 7,
+      detail: false,
+      borderWidth: 1.5,
+    });
+    thumb.appendChild(preview);
     const use = document.createElement("button");
     use.type = "button";
     use.className = "custom-shape-use";
@@ -5104,7 +5148,7 @@ function draw() {
   activeLiveMirrorPreviewModel = buildActiveLiveMirrorPreviewModel();
   ctx.fillStyle = COLORS.bg;
   ctx.fillRect(0, 0, viewport.width, viewport.height);
-  if (editorSettings.gridVisible) drawGrid();
+  drawGrid();
   drawMirrorAxes();
   drawBoundaryFogMask();
   drawHoles();
@@ -5128,6 +5172,14 @@ function draw() {
   activeLiveMirrorPreviewModel = null;
 }
 
+function getGridLayerVisibility(settings = editorSettings) {
+  return {
+    regular: Boolean(settings.gridVisible),
+    major: Boolean(settings.gridMajorVisible),
+    origin: Boolean(settings.originAxesVisible),
+  };
+}
+
 function drawGrid() {
   const left = screenToWorld(0, 0).x;
   const right = screenToWorld(viewport.width, 0).x;
@@ -5137,29 +5189,32 @@ function drawGrid() {
   const majorCell = cell * 5;
   const xStart = Math.floor(left / cell) * cell;
   const yStart = Math.floor(top / cell) * cell;
+  const layers = getGridLayerVisibility();
 
-  ctx.strokeStyle = COLORS.gridMinor;
-  ctx.lineWidth = Math.max(0.25, Number(editorSettings.gridLineWidth) || 1);
+  if (layers.regular) {
+    ctx.strokeStyle = COLORS.gridMinor;
+    ctx.lineWidth = Math.max(0.25, Number(editorSettings.gridLineWidth) || 1);
 
-  for (let x = xStart; x <= right; x += cell) {
-    if (editorSettings.gridMajorVisible && Math.abs(x % majorCell) < 0.001) continue;
-    const sx = worldToScreen(x, 0).x;
-    ctx.beginPath();
-    ctx.moveTo(sx, 0);
-    ctx.lineTo(sx, viewport.height);
-    ctx.stroke();
+    for (let x = xStart; x <= right; x += cell) {
+      if (layers.major && Math.abs(x % majorCell) < 0.001) continue;
+      const sx = worldToScreen(x, 0).x;
+      ctx.beginPath();
+      ctx.moveTo(sx, 0);
+      ctx.lineTo(sx, viewport.height);
+      ctx.stroke();
+    }
+
+    for (let y = yStart; y <= bottom; y += cell) {
+      if (layers.major && Math.abs(y % majorCell) < 0.001) continue;
+      const sy = worldToScreen(0, y).y;
+      ctx.beginPath();
+      ctx.moveTo(0, sy);
+      ctx.lineTo(viewport.width, sy);
+      ctx.stroke();
+    }
   }
 
-  for (let y = yStart; y <= bottom; y += cell) {
-    if (editorSettings.gridMajorVisible && Math.abs(y % majorCell) < 0.001) continue;
-    const sy = worldToScreen(0, y).y;
-    ctx.beginPath();
-    ctx.moveTo(0, sy);
-    ctx.lineTo(viewport.width, sy);
-    ctx.stroke();
-  }
-
-  if (editorSettings.gridMajorVisible) {
+  if (layers.major) {
     const majorXStart = Math.floor(left / majorCell) * majorCell;
     const majorYStart = Math.floor(top / majorCell) * majorCell;
     ctx.strokeStyle = COLORS.gridMajor;
@@ -5183,8 +5238,8 @@ function drawGrid() {
   }
 
   // Emphasize the world axes so the map's horizontal and vertical halves are easy to read.
-  if (editorSettings.originAxesVisible) {
-    ctx.strokeStyle = "#7C95AA";
+  if (layers.origin) {
+    ctx.strokeStyle = COLORS.originAxis;
     ctx.lineWidth = Math.max(0.25, Number(editorSettings.gridLineWidth) || 1) * 2.25;
     if (left <= 0 && right >= 0) {
       const sx = worldToScreen(0, 0).x;
@@ -5925,6 +5980,263 @@ function getTotalWallLength() {
     if (a && b) total += distance(a.x, a.y, b.x, b.y);
   });
   return total;
+}
+
+function createCleanRenderScene(mapState = state) {
+  return {
+    boundary: (mapState.map_boundaries || []).map((point) => ({ x: Number(point.x), y: Number(point.y) })),
+    holes: (mapState.map_holes || []).map((hole) => ({
+      points: (hole.points || []).map((point) => ({ x: Number(point.x), y: Number(point.y) })),
+    })),
+    spawns: (mapState.spawn_points || []).map((item) => ({ ...item, x: Number(item.x), y: Number(item.y) })),
+    bombs: (mapState.bomb_sites || []).map((item) => ({ ...item, x: Number(item.x), y: Number(item.y) })),
+    towers: (mapState.towers || []).map((item) => ({ ...item, x: Number(item.x), y: Number(item.y) })),
+    walls: (mapState.walls || []).map((item) => ({ ...item })),
+    structures: (mapState.structures || []).map((item) => ({ ...item, x: Number(item.x), y: Number(item.y) })),
+    spawnProtectionSize: Math.max(1, Number(mapState.spawn_protection_size) || 500),
+  };
+}
+
+function createClipboardRenderScene(clipboard) {
+  const point = (item) => ({ ...item, x: Number(item.dx) || 0, y: Number(item.dy) || 0 });
+  return {
+    boundary: (clipboard?.boundaries || []).map(point),
+    holes: (clipboard?.holes || []).map((hole) => ({ points: (hole.points || []).map(point) })),
+    spawns: (clipboard?.spawns || []).map(point),
+    bombs: (clipboard?.bombs || []).map(point),
+    towers: (clipboard?.towers || []).map(point),
+    walls: (clipboard?.walls || []).map((item) => ({ ...item })),
+    structures: (clipboard?.structures || []).map(point),
+    spawnProtectionSize: Math.max(1, Number(state.spawn_protection_size) || 500),
+  };
+}
+
+function getCleanRenderBounds(scene) {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  const include = (x, y, radiusX = 0, radiusY = radiusX) => {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    minX = Math.min(minX, x - radiusX);
+    minY = Math.min(minY, y - radiusY);
+    maxX = Math.max(maxX, x + radiusX);
+    maxY = Math.max(maxY, y + radiusY);
+  };
+
+  if (scene.boundary.length >= 3) {
+    scene.boundary.forEach((point) => include(point.x, point.y));
+  } else {
+    scene.boundary.forEach((point) => include(point.x, point.y));
+    scene.holes.forEach((hole) => hole.points.forEach((point) => include(point.x, point.y)));
+    scene.towers.forEach((tower) => include(tower.x, tower.y, GAME.TOWER_DIAMETER / 2));
+    scene.spawns.forEach((spawn) => include(spawn.x, spawn.y, scene.spawnProtectionSize / 2));
+    scene.bombs.forEach((bomb) => include(bomb.x, bomb.y, GAME.BOMB_DIAMETER / 2));
+    scene.structures.forEach((structure) => include(structure.x, structure.y, Math.max(1, Number(structure.size) || 1) / 2));
+  }
+
+  if (![minX, minY, maxX, maxY].every(Number.isFinite)) return { minX: -100, minY: -100, maxX: 100, maxY: 100, width: 200, height: 200 };
+  if (maxX - minX < 1) { minX -= 50; maxX += 50; }
+  if (maxY - minY < 1) { minY -= 50; maxY += 50; }
+  return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY };
+}
+
+function renderCleanSceneToCanvas(targetCanvas, scene, options = {}) {
+  const width = Math.max(1, Math.round(options.width || targetCanvas.width || 800));
+  const height = Math.max(1, Math.round(options.height || targetCanvas.height || 600));
+  const padding = Math.max(0, Number(options.padding) || 0);
+  const detail = options.detail !== false;
+  targetCanvas.width = width;
+  targetCanvas.height = height;
+  if (typeof targetCanvas.getContext !== "function") return targetCanvas;
+  const target = targetCanvas.getContext("2d");
+  if (!target) return targetCanvas;
+  target.setTransform(1, 0, 0, 1, 0, 0);
+  target.clearRect(0, 0, width, height);
+
+  const bounds = getCleanRenderBounds(scene);
+  const availableWidth = Math.max(1, width - padding * 2);
+  const availableHeight = Math.max(1, height - padding * 2);
+  const scale = Math.min(availableWidth / bounds.width, availableHeight / bounds.height);
+  const drawWidth = bounds.width * scale;
+  const drawHeight = bounds.height * scale;
+  const offsetX = (width - drawWidth) / 2 - bounds.minX * scale;
+  const offsetY = (height - drawHeight) / 2 - bounds.minY * scale;
+  const screen = (point) => ({ x: point.x * scale + offsetX, y: point.y * scale + offsetY });
+  const tracePolygon = (points) => {
+    points.forEach((point, index) => {
+      const p = screen(point);
+      if (index === 0) target.moveTo(p.x, p.y);
+      else target.lineTo(p.x, p.y);
+    });
+    if (points.length >= 3) target.closePath();
+  };
+  const traceMapArea = () => {
+    tracePolygon(scene.boundary);
+    scene.holes.forEach((hole) => { if (hole.points.length >= 3) tracePolygon(hole.points); });
+  };
+  const teamColor = (teamId) => TEAM_COLORS[String(teamId)] || COLORS.neutral;
+  const towerById = new Map(scene.towers.map((tower) => [tower.id, tower]));
+
+  if (scene.boundary.length >= 3) {
+    target.beginPath();
+    traceMapArea();
+    // Inside the boundary takes the active canvas theme. Outside it, and inside
+    // any hole, stays transparent because the canvas was cleared, not filled.
+    target.fillStyle = options.surface || COLORS.terrain;
+    target.fill("evenodd");
+    target.save();
+    target.beginPath();
+    traceMapArea();
+    target.clip("evenodd");
+  } else {
+    target.save();
+  }
+
+  scene.spawns.forEach((spawn) => {
+    const p = screen(spawn);
+    const size = scene.spawnProtectionSize * scale;
+    const color = teamColor(spawn.team_id);
+    target.fillStyle = withAlpha(color, 0.12);
+    target.strokeStyle = withAlpha(color, 0.72);
+    target.lineWidth = Math.max(1, Math.min(3, 3 * scale));
+    target.fillRect(p.x - size / 2, p.y - size / 2, size, size);
+    target.strokeRect(p.x - size / 2, p.y - size / 2, size, size);
+  });
+
+  scene.bombs.forEach((bomb) => {
+    const p = screen(bomb);
+    const radius = (GAME.BOMB_DIAMETER / 2) * scale;
+    target.beginPath();
+    target.arc(p.x, p.y, radius, 0, Math.PI * 2);
+    target.fillStyle = "rgba(51, 127, 229, 0.13)";
+    target.strokeStyle = "rgba(51, 127, 229, 0.78)";
+    target.lineWidth = Math.max(1, Math.min(5, 7 * scale));
+    target.fill();
+    target.stroke();
+    if (detail && radius >= 12) {
+      target.fillStyle = "#245D9F";
+      target.font = `700 ${Math.max(10, Math.min(72 * scale, radius * 0.9))}px sans-serif`;
+      target.textAlign = "center";
+      target.textBaseline = "middle";
+      target.fillText(String(bomb.site_letter || "A"), p.x, p.y);
+    }
+  });
+
+  scene.walls.forEach((wall) => {
+    const a = towerById.get(wall.t1);
+    const b = towerById.get(wall.t2);
+    if (!a || !b) return;
+    const start = screen(a);
+    const end = screen(b);
+    target.beginPath();
+    target.moveTo(start.x, start.y);
+    target.lineTo(end.x, end.y);
+    target.lineCap = "round";
+    target.lineWidth = Math.max(1.5, GAME.WALL_THICKNESS * scale);
+    target.strokeStyle = withAlpha(teamColor(wall.team_id), 0.82);
+    target.stroke();
+  });
+
+  scene.structures.forEach((structure) => {
+    const p = screen(structure);
+    const size = Math.max(2, Math.max(1, Number(structure.size) || 1) * scale);
+    const color = TEAM_COLORS[String(structure.team_id)] || structure.color || COLORS.concrete;
+    target.fillStyle = color;
+    target.strokeStyle = "#596574";
+    target.lineWidth = Math.max(1, Math.min(2, 2 * scale));
+    target.fillRect(p.x - size / 2, p.y - size / 2, size, size);
+    target.strokeRect(p.x - size / 2, p.y - size / 2, size, size);
+    if (detail && size >= 14 && structure.label) {
+      target.fillStyle = "#FFFFFF";
+      target.font = `700 ${Math.max(9, Math.min(18, size * 0.34))}px sans-serif`;
+      target.textAlign = "center";
+      target.textBaseline = "middle";
+      target.fillText(String(structure.label).slice(0, 4), p.x, p.y);
+    }
+  });
+
+  scene.spawns.forEach((spawn) => {
+    const p = screen(spawn);
+    const size = Math.max(3, Math.min(18, 20 * scale));
+    target.fillStyle = teamColor(spawn.team_id);
+    target.fillRect(p.x - size / 2, p.y - size / 2, size, size);
+  });
+
+  scene.towers.forEach((tower) => {
+    const p = screen(tower);
+    const radius = Math.max(2, (GAME.TOWER_DIAMETER / 2) * scale);
+    const color = teamColor(tower.team_id);
+    target.beginPath();
+    target.arc(p.x, p.y, radius, 0, Math.PI * 2);
+    target.fillStyle = color;
+    target.strokeStyle = tower.is_invincible ? "#D5A21B" : "#FFFFFF";
+    target.lineWidth = Math.max(1, Math.min(4, (GAME.TOWER_DIAMETER / 11) * scale));
+    target.fill();
+    target.stroke();
+    if (detail && !tower.is_invincible && radius >= 7) {
+      target.fillStyle = "#FFFFFF";
+      target.font = `600 ${Math.max(8, Math.min(20, radius * 0.72))}px sans-serif`;
+      target.textAlign = "center";
+      target.textBaseline = "middle";
+      target.fillText(String(tower.health || GAME.TOWER_MAX_HEALTH), p.x, p.y);
+    }
+  });
+  target.restore();
+
+  target.beginPath();
+  if (scene.boundary.length) tracePolygon(scene.boundary);
+  target.strokeStyle = "#8B95A3";
+  target.lineJoin = "round";
+  target.lineWidth = options.borderWidth || (detail ? 2 : 1.25);
+  if (scene.boundary.length >= 2) target.stroke();
+  scene.holes.forEach((hole) => {
+    if (hole.points.length < 2) return;
+    target.beginPath();
+    tracePolygon(hole.points);
+    target.stroke();
+  });
+  return targetCanvas;
+}
+
+function createCleanMapCanvas(mapState = state) {
+  const scene = createCleanRenderScene(mapState);
+  const bounds = getCleanRenderBounds(scene);
+  const padding = 36;
+  const longest = Math.max(bounds.width, bounds.height);
+  const scale = (2400 - padding * 2) / Math.max(1, longest);
+  const output = document.createElement("canvas");
+  return renderCleanSceneToCanvas(output, scene, {
+    width: Math.max(96, Math.ceil(bounds.width * scale + padding * 2)),
+    height: Math.max(96, Math.ceil(bounds.height * scale + padding * 2)),
+    padding,
+    detail: true,
+    borderWidth: 2,
+  });
+}
+
+function exportMapImage() {
+  if (state.map_boundaries.length < 3) {
+    setActionState("Create a complete map boundary before exporting an image", "warn", true);
+    return false;
+  }
+  const output = createCleanMapCanvas(state);
+  output.toBlob((blob) => {
+    if (!blob) {
+      setActionState("Could not create the map image", "error", true);
+      return;
+    }
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "map.png";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    setActionState(`Map image exported on the ${editorSettings.theme === "light" ? "light" : "dark"} background`, "success", true);
+  }, "image/png");
+  return true;
 }
 
 function exportJSON() {
@@ -8292,7 +8604,7 @@ if (!globalThis.__COSMOWAR_EDITOR_TEST__) {
       saveSession();
     },
     setTheme(theme) {
-      editorSettings.theme = theme === "light" ? "light" : "dark";
+      applyCanvasTheme(theme);
       saveSession();
     },
     newMap: createNewMapFromMenu,
@@ -8466,6 +8778,13 @@ if (globalThis.__COSMOWAR_EDITOR_TEST__) {
       return Array.from(selection);
     },
     getSettings: () => cloneState(editorSettings),
+    getGridLayerVisibility: () => getGridLayerVisibility(),
+    getCanvasColors: () => cloneState(COLORS),
+    setCanvasTheme(theme) {
+      applyCanvasTheme(theme);
+      return cloneState(COLORS);
+    },
+    getCleanRenderBounds: () => cloneState(getCleanRenderBounds(createCleanRenderScene(state))),
     updateSettings(patch, persist = true) {
       Object.keys(editorSettings).forEach((key) => {
         if (Object.hasOwn(patch, key)) editorSettings[key] = patch[key];
