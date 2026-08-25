@@ -1817,7 +1817,7 @@ function onMouseDown(event) {
   if (event.button !== 0) return;
 
   if (conversionSession) {
-    setActionState("Finish or cancel the Defly conversion before editing", "warn", true);
+    setActionState("Finish or cancel the map conversion before editing", "warn", true);
     return;
   }
 
@@ -2060,7 +2060,7 @@ function onKeyDown(event) {
   }
   if (conversionSession && !isTypingInFormControl() && (mod || key === "delete" || key === "backspace")) {
     event.preventDefault();
-    setActionState("Finish or cancel the Defly conversion before editing", "warn", true);
+    setActionState("Finish or cancel the map conversion before editing", "warn", true);
     return;
   }
   interaction.snapTemporarilyDisabled = event.ctrlKey;
@@ -3178,15 +3178,20 @@ function buildSelectionClipboard() {
   const entries = getSelectionEntries();
   const towerIds = new Set();
   const wallsByUid = new Map();
+  const holeUids = new Set();
   const spawns = [];
   const bombs = [];
   const structures = [];
+  const boundaries = [];
 
   entries.forEach((entry) => {
     if (entry.type === "tower") towerIds.add(entry.item.id);
     else if (entry.type === "spawn") spawns.push(cloneState(entry.item));
     else if (entry.type === "bomb") bombs.push(cloneState(entry.item));
     else if (entry.type === "structure") structures.push(cloneState(entry.item));
+    else if (entry.type === "boundary") boundaries.push(cloneState(entry.item));
+    else if (entry.type === "hole") holeUids.add(entry.item.uid);
+    else if (entry.type === "holeVertex") holeUids.add(entry.hole.uid);
     else if (entry.type === "wall") {
       wallsByUid.set(entry.item.uid, cloneState(entry.item));
       towerIds.add(entry.item.t1);
@@ -3199,11 +3204,14 @@ function buildSelectionClipboard() {
   });
 
   const towers = state.towers.filter((tower) => towerIds.has(tower.id)).map((tower) => cloneState(tower));
+  const holes = state.map_holes.filter((hole) => holeUids.has(hole.uid)).map((hole) => cloneState(hole));
   const centers = [
     ...towers.map((item) => ({ x: item.x, y: item.y })),
     ...spawns.map((item) => ({ x: item.x, y: item.y })),
     ...bombs.map((item) => ({ x: item.x, y: item.y })),
     ...structures.map((item) => ({ x: item.x, y: item.y })),
+    ...boundaries.map((item) => ({ x: item.x, y: item.y })),
+    ...holes.flatMap((hole) => hole.points.map((point) => ({ x: point.x, y: point.y }))),
   ];
 
   if (!centers.length) {
@@ -3220,19 +3228,22 @@ function buildSelectionClipboard() {
     spawns: spawns.map(withOffset),
     bombs: bombs.map(withOffset),
     structures: structures.map(withOffset),
+    boundaries: boundaries.map(withOffset),
+    holes: holes.map((hole) => ({ points: hole.points.map(withOffset) })),
     walls: Array.from(wallsByUid.values()).filter((wall) => towerIds.has(wall.t1) && towerIds.has(wall.t2)),
     origin,
   };
 }
 
 function getClipboardObjectCount(clipboard) {
-  return ["towers", "spawns", "bombs", "structures", "walls"]
+  return ["towers", "spawns", "bombs", "structures", "walls", "boundaries", "holes"]
     .reduce((total, key) => total + (Array.isArray(clipboard?.[key]) ? clipboard[key].length : 0), 0);
 }
 
 function normalizeCustomShapeClipboard(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Custom shape data must be an object.");
   const list = (key) => {
+    if (value[key] === undefined) return [];
     if (!Array.isArray(value[key])) throw new Error(`Custom shape ${key} must be an array.`);
     return value[key];
   };
@@ -3283,6 +3294,12 @@ function normalizeCustomShapeClipboard(value) {
     color: String(structure?.color || COLORS.concrete),
     team_id: expectInteger(structure?.team_id, `structures[${index}].team_id`),
   })));
+  const boundaries = list("boundaries").map((boundary, index) => offset(boundary, `boundaries[${index}]`));
+  const holes = sortObjects(list("holes").map((hole, holeIndex) => {
+    if (!Array.isArray(hole?.points)) throw new Error(`holes[${holeIndex}].points must be an array.`);
+    if (hole.points.length < 3) throw new Error(`holes[${holeIndex}] must contain at least 3 points.`);
+    return { points: hole.points.map((point, pointIndex) => offset(point, `holes[${holeIndex}].points[${pointIndex}]`)) };
+  }));
   const walls = sortObjects(list("walls").map((wall, index) => {
     const mappedA = towerIdMap.get(expectInteger(wall?.t1, `walls[${index}].t1`));
     const mappedB = towerIdMap.get(expectInteger(wall?.t2, `walls[${index}].t2`));
@@ -3294,10 +3311,10 @@ function normalizeCustomShapeClipboard(value) {
       team_id: expectInteger(wall?.team_id, `walls[${index}].team_id`),
     };
   }));
-  if (!getClipboardObjectCount({ towers: normalizedTowers, spawns, bombs, structures, walls })) {
+  if (!getClipboardObjectCount({ towers: normalizedTowers, spawns, bombs, structures, walls, boundaries, holes })) {
     throw new Error("Custom shape contains no supported objects.");
   }
-  return { towers: normalizedTowers, spawns, bombs, structures, walls, origin: { x: 0, y: 0 } };
+  return { towers: normalizedTowers, spawns, bombs, structures, walls, boundaries, holes, origin: { x: 0, y: 0 } };
 }
 
 function getCustomShapeSignature(clipboard) {
@@ -3346,7 +3363,7 @@ function saveSelectionAsCustomShape() {
 
 function useCustomShape(id) {
   if (conversionSession) {
-    setActionState("Finish or cancel the Defly conversion before placing a custom shape", "warn", true);
+    setActionState("Finish or cancel the map conversion before placing a custom shape", "warn", true);
     return false;
   }
   const shape = customShapes.find((item) => item.id === id);
@@ -3387,7 +3404,7 @@ function renderCustomShapes() {
     title.textContent = shape.name;
     const meta = document.createElement("span");
     const count = getClipboardObjectCount(shape.clipboard);
-    meta.textContent = `${count} item${count === 1 ? "" : "s"} · click to place`;
+    meta.textContent = `${count} object${count === 1 ? "" : "s"} · click to place`;
     use.appendChild(title);
     use.appendChild(meta);
     use.addEventListener("click", () => useCustomShape(shape.id));
@@ -3546,31 +3563,50 @@ function getPasteDraftEntities(draft) {
       y: roundTo(draft.center.y + rotated.y, 3),
     };
   };
+  const list = (key) => Array.isArray(draft.clipboard?.[key]) ? draft.clipboard[key] : [];
   return {
-    towers: draft.clipboard.towers.map(rotateItem),
-    spawns: draft.clipboard.spawns.map(rotateItem),
-    bombs: draft.clipboard.bombs.map(rotateItem),
-    structures: draft.clipboard.structures.map(rotateItem),
-    walls: draft.clipboard.walls.map((wall) => ({ ...wall })),
+    towers: list("towers").map(rotateItem),
+    spawns: list("spawns").map(rotateItem),
+    bombs: list("bombs").map(rotateItem),
+    structures: list("structures").map(rotateItem),
+    boundaries: list("boundaries").map(rotateItem),
+    holes: list("holes").map((hole) => ({ points: (hole.points || []).map(rotateItem) })),
+    walls: list("walls").map((wall) => ({ ...wall })),
   };
 }
 
 function validatePasteDraft(draft) {
   const entities = getPasteDraftEntities(draft);
   const towerByOriginalId = new Map(entities.towers.map((tower) => [tower.id, tower]));
+  if (entities.boundaries.length > 0 && entities.boundaries.length < 3) {
+    return { valid: false, reason: "A custom shape boundary needs at least 3 vertices." };
+  }
+  const candidateBoundary = entities.boundaries.length ? entities.boundaries : state.map_boundaries;
+  const candidateHoles = [
+    ...state.map_holes,
+    ...entities.holes.map((hole, index) => ({
+      uid: `paste_hole_${index}`,
+      points: hole.points.map((point, pointIndex) => ({ uid: `paste_hole_${index}_${pointIndex}`, x: point.x, y: point.y })),
+    })),
+  ];
+  const placementState = { ...state, map_boundaries: candidateBoundary, map_holes: candidateHoles };
+  const firstPastedHoleIndex = state.map_holes.length;
+  const holeIssue = HOLE_GEOMETRY.validateMapHoles(placementState)
+    .find((issue) => issue.holeIndexes.some((index) => index >= firstPastedHoleIndex));
+  if (holeIssue) return { valid: false, reason: holeIssue.message };
 
   for (const spawn of entities.spawns) {
-    if (!isPlacementInsideBoundary("spawn", spawn.x, spawn.y)) return { valid: false, reason: "Spawn would be outside map boundary." };
+    if (!isPlacementInsideBoundary("spawn", spawn.x, spawn.y, spawn, placementState)) return { valid: false, reason: "Spawn would be outside map boundary." };
     if (state.spawn_points.some((existing) => existing.team_id === spawn.team_id)) return { valid: false, reason: "Pasted spawn would duplicate an existing team spawn." };
   }
   for (const bomb of entities.bombs) {
-    if (!isPlacementInsideBoundary("bomb", bomb.x, bomb.y)) return { valid: false, reason: "Bomb site would be outside map boundary." };
+    if (!isPlacementInsideBoundary("bomb", bomb.x, bomb.y, bomb, placementState)) return { valid: false, reason: "Bomb site would be outside map boundary." };
   }
   for (const structure of entities.structures) {
-    if (!isPlacementInsideBoundary("structure", structure.x, structure.y, structure)) return { valid: false, reason: "Structure would be outside map boundary." };
+    if (!isPlacementInsideBoundary("structure", structure.x, structure.y, structure, placementState)) return { valid: false, reason: "Structure would be outside map boundary." };
   }
   for (const tower of entities.towers) {
-    if (!isPlacementInsideBoundary("tower", tower.x, tower.y)) return { valid: false, reason: "Tower would be outside map boundary." };
+    if (!isPlacementInsideBoundary("tower", tower.x, tower.y, tower, placementState)) return { valid: false, reason: "Tower would be outside map boundary." };
     if (hasTowerOverlapAt(tower.x, tower.y)) return { valid: false, reason: "Tower would overlap an existing tower." };
     if (entities.towers.some((other) => other.id !== tower.id && distance(tower.x, tower.y, other.x, other.y) < GAME.TOWER_DIAMETER - 0.001)) {
       return { valid: false, reason: "Copied towers would overlap each other." };
@@ -3624,6 +3660,23 @@ function commitPasteDraft() {
   withAction("PASTE_GROUP", () => {
     const towerIdMap = new Map();
     const pastedKeys = [];
+
+    if (entities.boundaries.length) {
+      state.map_boundaries = entities.boundaries.map((boundary) => {
+        const pasted = { uid: createUid("boundary"), x: boundary.x, y: boundary.y };
+        pastedKeys.push(makeKey("boundary", pasted.uid));
+        return pasted;
+      });
+    }
+
+    entities.holes.forEach((hole) => {
+      const pasted = {
+        uid: createUid("hole"),
+        points: hole.points.map((point) => ({ uid: createUid("hole_vertex"), x: point.x, y: point.y })),
+      };
+      state.map_holes.push(pasted);
+      pastedKeys.push(makeKey("hole", pasted.uid));
+    });
 
     entities.towers.forEach((tower) => {
       const pasted = {
@@ -3827,6 +3880,7 @@ function updateLiveSelectionCoordinates() {
 
 function renderSelectionPanel() {
   const entries = getSelectionEntries();
+  if (el.saveCustomShapeBtn) el.saveCustomShapeBtn.disabled = entries.length === 0;
   if (entries.length === 0) {
     el.selectionPanel.innerHTML = `<p class="muted">No selection yet.</p>`;
     return;
@@ -5020,6 +5074,46 @@ function drawPasteDraft() {
   const invalid = !validatePasteDraft(draft).valid;
   const towerByOriginalId = new Map(entities.towers.map((tower) => [tower.id, tower]));
 
+  if (entities.boundaries.length) {
+    ctx.beginPath();
+    entities.boundaries.forEach((boundary, index) => {
+      const point = worldToScreen(boundary.x, boundary.y);
+      if (index === 0) ctx.moveTo(point.x, point.y);
+      else ctx.lineTo(point.x, point.y);
+    });
+    if (entities.boundaries.length >= 3) ctx.closePath();
+    ctx.strokeStyle = invalid ? COLORS.danger : withAlpha(COLORS.guide, 0.9);
+    ctx.lineWidth = 3 * view.scale;
+    ctx.globalAlpha = 0.75;
+    ctx.stroke();
+    entities.boundaries.forEach((boundary) => {
+      const point = worldToScreen(boundary.x, boundary.y);
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, 5, 0, Math.PI * 2);
+      ctx.fillStyle = invalid ? COLORS.danger : COLORS.guide;
+      ctx.fill();
+    });
+    ctx.globalAlpha = 1;
+  }
+
+  entities.holes.forEach((hole) => {
+    if (!hole.points.length) return;
+    ctx.beginPath();
+    hole.points.forEach((point, index) => {
+      const screen = worldToScreen(point.x, point.y);
+      if (index === 0) ctx.moveTo(screen.x, screen.y);
+      else ctx.lineTo(screen.x, screen.y);
+    });
+    if (hole.points.length >= 3) ctx.closePath();
+    ctx.fillStyle = invalid ? withAlpha(COLORS.danger, 0.28) : COLORS.boundaryFog;
+    ctx.strokeStyle = invalid ? COLORS.danger : withAlpha(COLORS.guide, 0.9);
+    ctx.lineWidth = 3 * view.scale;
+    ctx.globalAlpha = 0.8;
+    if (hole.points.length >= 3) ctx.fill();
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  });
+
   entities.walls.forEach((wall) => {
     const aTower = towerByOriginalId.get(wall.t1);
     const bTower = towerByOriginalId.get(wall.t2);
@@ -5446,8 +5540,8 @@ function getDeflyConversionOptions() {
   };
 }
 
-function beginDeflyConversion(contents, fileName = "Defly map") {
-  if (typeof convertDeflyMap !== "function") throw new Error("The Defly converter is unavailable.");
+function beginDeflyConversion(contents, fileName = "source map") {
+  if (typeof convertDeflyMap !== "function") throw new Error("The map converter is unavailable.");
   if (conversionSession) cancelDeflyConversion(false);
   el.deflySpacingInput.value = "100";
   el.deflyUnitSizeInput.value = "32";
@@ -5457,7 +5551,7 @@ function beginDeflyConversion(contents, fileName = "Defly map") {
   el.deflyBoundaryPaddingInput.value = "1";
   conversionSession = {
     sourceText: String(contents),
-    fileName: String(fileName || "Defly map"),
+    fileName: String(fileName || "source map"),
     beforeState: cloneState(state),
     beforeView: { ...view },
     valid: false,
@@ -5490,6 +5584,7 @@ function updateDeflyConversionPreview() {
   try {
     const converted = convertDeflyMap(conversionSession.sourceText, getDeflyConversionOptions());
     const preview = parseImportedState(converted);
+    centerMapStateOnOrigin(preview);
     conversionSession.valid = true;
     conversionSession.previewState = cloneState(preview);
     applyConversionPreviewState(preview);
@@ -5498,7 +5593,7 @@ function updateDeflyConversionPreview() {
     el.deflyConversionStatus.classList.remove("error");
     el.deflyConversionStatus.textContent = `${state.towers.length} towers · ${state.walls.length} walls · ${roundTo(width, 1)} × ${roundTo(height, 1)} map`;
     el.finishDeflyConversionBtn.disabled = false;
-    setActionState("Defly conversion preview — adjust values or finish", "idle");
+    setActionState("Map conversion preview — adjust values or finish", "idle");
     return true;
   } catch (error) {
     conversionSession.valid = false;
@@ -5516,14 +5611,14 @@ function finishDeflyConversion() {
   const after = cloneState(state);
   conversionSession = null;
   el.deflyConversionPanel.classList.add("hidden");
-  pushHistory("IMPORT_DEFLY", session.beforeState, after);
+  pushHistory("IMPORT_CONVERTED_MAP", session.beforeState, after);
   onStateChanged();
   const report = getMapValidationReport();
   if (report.issues.length) {
     const additional = report.issues.length > 1 ? ` (+${report.issues.length - 1} more)` : "";
-    setActionState(`Defly conversion finished with validation issues: ${report.issues[0].message}${additional}`, "warn");
+    setActionState(`Map conversion finished with validation issues: ${report.issues[0].message}${additional}`, "warn");
   } else {
-    setActionState("Defly conversion finished", "success", true);
+    setActionState("Map conversion finished", "success", true);
   }
   return true;
 }
@@ -5537,7 +5632,7 @@ function cancelDeflyConversion(showMessage = true) {
   state = previous;
   Object.assign(view, previousView);
   onStateReplaced();
-  if (showMessage) setActionState("Defly conversion cancelled", "idle", true);
+  if (showMessage) setActionState("Map conversion cancelled", "idle", true);
   return true;
 }
 
@@ -5562,6 +5657,7 @@ function importMap(event) {
         ? parsed.towers.filter((tower) => Number(tower?.health) > GAME.TOWER_MAX_HEALTH).length
         : 0;
       const imported = parseImportedState(parsed);
+      centerMapStateOnOrigin(imported);
       const before = cloneState(state);
       state = imported;
       pushHistory("IMPORT_JSON", before, cloneState(state));
@@ -5811,10 +5907,32 @@ function drawLiveMirrorPreview() {
     entities.spawns.forEach((item) => previewEntries.push({ type: "spawn", item }));
     entities.bombs.forEach((item) => previewEntries.push({ type: "bomb", item }));
     entities.structures.forEach((item) => previewEntries.push({ type: "structure", item }));
+    entities.boundaries.forEach((item) => previewEntries.push({ type: "boundary", item }));
   }
   ctx.save();
   ctx.globalAlpha = 0.48;
   if (mirrorState.liveEnabled) drawMirroredHoleDraftPreview(previewAxes);
+  if (mirrorState.liveEnabled && interaction.pasteDraft) {
+    const entities = getPasteDraftEntities(interaction.pasteDraft);
+    entities.holes.forEach((hole) => {
+      getMirrorTransformVariants(previewAxes).forEach((variant) => {
+        const points = hole.points.map((point) => transformPointByAxes(point, variant.axes));
+        if (!points.length) return;
+        ctx.beginPath();
+        points.forEach((point, index) => {
+          const screen = worldToScreen(point.x, point.y);
+          if (index === 0) ctx.moveTo(screen.x, screen.y);
+          else ctx.lineTo(screen.x, screen.y);
+        });
+        if (points.length >= 3) ctx.closePath();
+        ctx.fillStyle = COLORS.boundaryFog;
+        ctx.strokeStyle = withAlpha(COLORS.guide, 0.9);
+        ctx.lineWidth = 3 * view.scale;
+        if (points.length >= 3) ctx.fill();
+        ctx.stroke();
+      });
+    });
+  }
   previewEntries.forEach((entry) => {
     getMirroredPointVariants(entry.item, previewAxes).forEach((variant) => {
       if (activeLiveMirrorPreviewModel?.previewSkip.has(`${entry.key}|${variant.key}`)) return;
@@ -6060,15 +6178,42 @@ function fitBoundaryInView() {
   requestRender();
 }
 
+function getMapCenterOffset(mapState) {
+  if (!mapState.map_boundaries.length) return null;
+  const xs = mapState.map_boundaries.map((point) => point.x);
+  const ys = mapState.map_boundaries.map((point) => point.y);
+  const offsetX = -((Math.min(...xs) + Math.max(...xs)) / 2);
+  const offsetY = -((Math.min(...ys) + Math.max(...ys)) / 2);
+  return { offsetX, offsetY };
+}
+
+function centerMapStateOnOrigin(mapState) {
+  const offset = getMapCenterOffset(mapState);
+  if (!offset) return { changed: false, offsetX: 0, offsetY: 0 };
+  const { offsetX, offsetY } = offset;
+  if (Math.abs(offsetX) <= 0.001 && Math.abs(offsetY) <= 0.001) {
+    return { changed: false, offsetX, offsetY };
+  }
+  const translate = (item) => {
+    item.x = roundTo(item.x + offsetX, 3);
+    item.y = roundTo(item.y + offsetY, 3);
+  };
+  mapState.map_boundaries.forEach(translate);
+  mapState.map_holes.forEach((hole) => hole.points.forEach(translate));
+  mapState.spawn_points.forEach(translate);
+  mapState.bomb_sites.forEach(translate);
+  mapState.towers.forEach(translate);
+  mapState.structures.forEach(translate);
+  return { changed: true, offsetX, offsetY };
+}
+
 function centerMapOnOrigin() {
-  if (!state.map_boundaries.length) {
+  const offset = getMapCenterOffset(state);
+  if (!offset) {
     setActionState("Add a map boundary before centering the map", "warn", true);
     return false;
   }
-  const xs = state.map_boundaries.map((point) => point.x);
-  const ys = state.map_boundaries.map((point) => point.y);
-  const offsetX = -((Math.min(...xs) + Math.max(...xs)) / 2);
-  const offsetY = -((Math.min(...ys) + Math.max(...ys)) / 2);
+  const { offsetX, offsetY } = offset;
   if (Math.abs(offsetX) <= 0.001 && Math.abs(offsetY) <= 0.001) {
     fitBoundaryInView();
     saveSession();
@@ -6076,17 +6221,7 @@ function centerMapOnOrigin() {
     return false;
   }
   const changed = withAction("CENTER_MAP_ON_ORIGIN", () => {
-    const translate = (item) => {
-      item.x = roundTo(item.x + offsetX, 3);
-      item.y = roundTo(item.y + offsetY, 3);
-    };
-    state.map_boundaries.forEach(translate);
-    state.map_holes.forEach((hole) => hole.points.forEach(translate));
-    state.spawn_points.forEach(translate);
-    state.bomb_sites.forEach(translate);
-    state.towers.forEach(translate);
-    state.structures.forEach(translate);
-    return true;
+    return centerMapStateOnOrigin(state).changed;
   });
   fitBoundaryInView();
   restoredViewFromSession = true;
@@ -7536,6 +7671,11 @@ if (globalThis.__COSMOWAR_EDITOR_TEST__) {
       mirrorSelectionOnce();
       return cloneState(state);
     },
+    centerImportedState(data) {
+      const imported = parseImportedState(data);
+      const result = centerMapStateOnOrigin(imported);
+      return { ...result, state: cloneState(imported) };
+    },
     selectMatching(key) {
       const source = resolveKey(key);
       if (!source) return [];
@@ -7600,6 +7740,7 @@ if (globalThis.__COSMOWAR_EDITOR_TEST__) {
       return true;
     },
     normalizeCustomShapeClipboard: (clipboard) => cloneState(normalizeCustomShapeClipboard(clipboard)),
+    getSelectionClipboard: () => cloneState(buildSelectionClipboard()),
     importCustomShapes(data) {
       const result = appendImportedCustomShapes(cloneState(data));
       return { ...result, shapes: cloneState(customShapes) };

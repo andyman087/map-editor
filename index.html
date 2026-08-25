@@ -73,18 +73,13 @@
 
       <section class="panel custom-shapes-panel">
         <h2>Custom Shapes</h2>
-        <p class="muted compact-note">Save the selected towers, walls, spawns, bomb sites, and structures as a reusable group.</p>
+        <p class="muted compact-note">Save any selected map objects as a reusable group.</p>
         <label class="field">
           <span>Preset name</span>
           <input id="customShapeNameInput" type="text" maxlength="60" placeholder="e.g. Fortified corner">
         </label>
-        <button id="saveCustomShapeBtn" class="action-button" type="button">Save Selection</button>
+        <button id="saveCustomShapeBtn" class="action-button" type="button" disabled>Save Selection</button>
         <div id="customShapesList" class="custom-shapes-list" aria-live="polite"></div>
-        <div class="inline-actions custom-shape-transfer-actions">
-          <button id="exportCustomShapesBtn" class="action-button secondary" type="button">Export All</button>
-          <button id="importCustomShapesBtn" class="action-button secondary" type="button">Import</button>
-        </div>
-        <input type="file" id="customShapesFileInput" accept=".json,application/json" hidden>
       </section>
 
       <section class="panel default-panel">
@@ -178,8 +173,18 @@
           <button id="hostSessionBtn" class="action-button" type="button">Copy host link</button>
         </section>
 
+        <section class="settings-section" aria-label="Custom shape transfer">
+          <h3>Custom Shapes</h3>
+          <p class="muted compact-note">Move your saved custom shapes between devices.</p>
+          <div class="inline-actions custom-shape-transfer-actions">
+            <button id="exportCustomShapesBtn" class="action-button secondary" type="button">Export All</button>
+            <button id="importCustomShapesBtn" class="action-button secondary" type="button">Import</button>
+          </div>
+          <input type="file" id="customShapesFileInput" accept=".json,application/json" hidden>
+        </section>
+
         <button id="exportBtn" class="action-button">Export Map</button>
-        <button id="importBtn" class="action-button secondary" title="Import JSON or Defly TXT map">Import Map</button>
+        <button id="importBtn" class="action-button secondary" title="Import JSON or TXT map">Import Map</button>
         <input type="file" id="importFileInput" accept=".json,.txt,application/json,text/plain" hidden>
       </section>
     </main>
@@ -187,11 +192,11 @@
     <div id="rightResizeHandle" class="panel-resize-handle right-panel-handle" role="separator" aria-label="Resize right panel" aria-orientation="vertical"></div>
 
     <aside class="sidebar right-sidebar">
-      <section id="deflyConversionPanel" class="panel conversion-panel hidden" aria-label="Defly map conversion">
-        <h2>Convert Defly Map</h2>
+      <section id="deflyConversionPanel" class="panel conversion-panel hidden" aria-label="Map conversion">
+        <h2>Convert Map</h2>
         <p class="muted compact-note">Adjust the conversion while the canvas updates live. Editing is paused until you finish or cancel.</p>
         <label class="field"><span>Object spacing (%)</span><input id="deflySpacingInput" type="number" min="1" max="1000" step="1" value="100"></label>
-        <label class="field"><span>Defly unit size</span><input id="deflyUnitSizeInput" type="number" min="0.1" max="1000" step="0.1" value="32"></label>
+        <label class="field"><span>Unit size</span><input id="deflyUnitSizeInput" type="number" min="0.1" max="1000" step="0.1" value="32"></label>
         <label class="field"><span>Spawn protection size</span><input id="deflySpawnSizeInput" type="number" min="1" max="10000" step="10" value="500"></label>
         <div class="dimension-grid">
           <label class="field"><span>Tower clearance</span><input id="deflyTowerClearanceInput" type="number" min="0" max="5000" step="0.1" value="35.2"></label>

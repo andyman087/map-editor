@@ -21,13 +21,13 @@ function convertDeflyMap(deflyText, scale = 100, spawnProtectionSize = 500) {
   scale = Number(options.spacingPercent ?? options.scale ?? (typeof scale === "number" ? scale : 100));
   spawnProtectionSize = Number(options.spawnProtectionSize ?? spawnProtectionSize);
   if (!Number.isFinite(scale) || scale <= 0) {
-    throw new Error("Scale must be a positive number.");
+    throw new Error("Object spacing must be a positive number.");
   }
   if (!Number.isFinite(spawnProtectionSize) || spawnProtectionSize <= 0) {
     throw new Error("Spawn protection size must be a positive number.");
   }
   if (!Number.isFinite(BASE_COORDINATE_SCALE) || BASE_COORDINATE_SCALE <= 0) {
-    throw new Error("Defly unit size must be a positive number.");
+    throw new Error("Unit size must be a positive number.");
   }
   if (!Number.isFinite(TARGET_TOWER_RADIUS) || TARGET_TOWER_RADIUS < 0) {
     throw new Error("Tower clearance cannot be negative.");

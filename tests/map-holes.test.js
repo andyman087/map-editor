@@ -507,6 +507,40 @@ test("centering on 0,0 translates the complete authored map and supports undo", 
   assert.equal(JSON.stringify(editor.getState()), JSON.stringify(before));
 });
 
+test("import centering places the map centre at 0,0 and preserves relative geometry", () => {
+  const editor = loadEditor();
+  const centered = editor.centerImportedState({
+    spawn_protection_size: 100,
+    map_boundaries: [
+      { x: 100, y: 200 }, { x: 1100, y: 200 }, { x: 1100, y: 1000 }, { x: 100, y: 1000 },
+    ],
+    map_holes: [[
+      { x: 450, y: 450 }, { x: 550, y: 450 }, { x: 550, y: 550 }, { x: 450, y: 550 },
+    ]],
+    spawn_points: [{ team_id: 0, x: 200, y: 300 }],
+    bomb_sites: [{ site_letter: "A", x: 800, y: 700 }],
+    towers: [
+      { id: 1, team_id: 0, health: 4, is_invincible: false, x: 300, y: 400 },
+      { id: 2, team_id: 0, health: 4, is_invincible: false, x: 500, y: 400 },
+    ],
+    walls: [{ id: 1, t1: 1, t2: 2, team_id: 0 }],
+    structures: [{ id: 1, x: 700, y: 500, size: 40, color: "#fff", team_id: -1 }],
+  });
+  const state = centered.state;
+  const xs = state.map_boundaries.map((point) => point.x);
+  const ys = state.map_boundaries.map((point) => point.y);
+
+  assert.equal(centered.changed, true);
+  assert.equal((Math.min(...xs) + Math.max(...xs)) / 2, 0);
+  assert.equal((Math.min(...ys) + Math.max(...ys)) / 2, 0);
+  assert.deepEqual({ x: state.map_holes[0].points[0].x, y: state.map_holes[0].points[0].y }, { x: -150, y: -150 });
+  assert.deepEqual({ x: state.spawn_points[0].x, y: state.spawn_points[0].y }, { x: -400, y: -300 });
+  assert.deepEqual({ x: state.bomb_sites[0].x, y: state.bomb_sites[0].y }, { x: 200, y: 100 });
+  assert.deepEqual(state.towers.map(({ x, y }) => ({ x, y })), [{ x: -300, y: -200 }, { x: -100, y: -200 }]);
+  assert.deepEqual({ x: state.structures[0].x, y: state.structures[0].y }, { x: 100, y: -100 });
+  assert.deepEqual({ t1: state.walls[0].t1, t2: state.walls[0].t2 }, { t1: 1, t2: 2 });
+});
+
 test("group snapping falls back to the legal pointer position instead of blocking movement", () => {
   const editor = loadEditor();
   editor.importState(baseMap({

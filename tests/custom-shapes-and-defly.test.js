@@ -132,6 +132,33 @@ test("using a custom shape enters the group placement path and recreates connect
   assert.deepEqual([placement.state.walls[0].t1, placement.state.walls[0].t2], [1, 2]);
 });
 
+test("custom shapes capture and place complete boundaries and holes", () => {
+  const editor = loadEditor();
+  editor.importState({
+    ...emptyMap(),
+    map_boundaries: [{ x: 1000, y: 0 }, { x: 3000, y: 0 }, { x: 3000, y: 3000 }, { x: 1000, y: 3000 }],
+    map_holes: [[{ x: 1800, y: 1300 }, { x: 2200, y: 1300 }, { x: 2200, y: 1700 }, { x: 1800, y: 1700 }]],
+  });
+  const authored = editor.getState();
+  editor.selectKeys([
+    ...authored.map_boundaries.map((point) => `boundary:${point.uid}`),
+    `holeVertex:${authored.map_holes[0].points[0].uid}`,
+  ]);
+  const clipboard = editor.getSelectionClipboard();
+  assert.equal(clipboard.boundaries.length, 4);
+  assert.equal(clipboard.holes.length, 1, "selecting any hole vertex should capture the complete hole");
+  assert.equal(clipboard.holes[0].points.length, 4);
+
+  editor.importState(emptyMap());
+  editor.clearCustomShapes();
+  editor.importCustomShapes({ custom_shapes: [{ name: "Arena shell", clipboard }] });
+  const placement = editor.placeCustomShape(0, 2000, 1500);
+  assert.equal(placement.valid, true);
+  assert.equal(placement.state.map_boundaries.length, 4, "a preset boundary should replace the current boundary");
+  assert.equal(placement.state.map_holes.length, 1);
+  assert.equal(placement.state.map_holes[0].points.length, 4);
+});
+
 const deflyText = [
   "MAP_WIDTH 100",
   "MAP_HEIGHT 60",
@@ -142,7 +169,7 @@ const deflyText = [
   "l 1 2",
 ].join("\n");
 
-test("Defly conversion options adjust spacing and clearances without changing connectivity", () => {
+test("map conversion options adjust spacing and clearances without changing connectivity", () => {
   const normal = convertDeflyMap(deflyText, {
     spacingPercent: 100,
     unitSize: 32,
@@ -169,8 +196,8 @@ test("Defly conversion options adjust spacing and clearances without changing co
   assert.deepEqual(expanded.walls, [{ t1: 1, t2: 2, team_id: 0 }]);
 });
 
-test("Defly conversion rejects invalid live-control values", () => {
-  assert.throws(() => convertDeflyMap(deflyText, { spacingPercent: 0 }), /Scale must be a positive number/);
-  assert.throws(() => convertDeflyMap(deflyText, { unitSize: 0 }), /unit size must be a positive number/);
+test("map conversion rejects invalid live-control values", () => {
+  assert.throws(() => convertDeflyMap(deflyText, { spacingPercent: 0 }), /Object spacing must be a positive number/);
+  assert.throws(() => convertDeflyMap(deflyText, { unitSize: 0 }), /Unit size must be a positive number/);
   assert.throws(() => convertDeflyMap(deflyText, { boundaryPadding: -1 }), /padding cannot be negative/);
 });
