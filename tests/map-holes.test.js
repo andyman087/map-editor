@@ -381,6 +381,38 @@ test("live mirror movement previews the selected wall and suppresses stale count
   assert.deepEqual([committed.walls[1].t1, committed.walls[1].t2], [3, 4]);
 });
 
+test("live mirror movement creates a missing counterpart wall with its new mirrored towers", () => {
+  const editor = loadEditor();
+  editor.importState({
+    spawn_protection_size: 100,
+    map_boundaries: [
+      { x: -2000, y: -1500 }, { x: 2000, y: -1500 }, { x: 2000, y: 1500 }, { x: -2000, y: 1500 },
+    ],
+    spawn_points: [{ team_id: 0, x: -1600, y: 0 }, { team_id: 1, x: 1600, y: 0 }],
+    bomb_sites: [],
+    towers: [
+      { id: 1, team_id: 0, health: 4, is_invincible: false, x: -1000, y: -300 },
+      { id: 2, team_id: 0, health: 4, is_invincible: false, x: -1000, y: 300 },
+    ],
+    walls: [{ id: 1, t1: 1, t2: 2, team_id: 0 }],
+  });
+  const initial = editor.getState();
+  editor.setMirror([{ type: "reflect", a: { x: 0, y: -1000 }, b: { x: 0, y: 1000 } }], true);
+  editor.selectKeys([
+    `tower:${initial.towers[0].uid}`,
+    `tower:${initial.towers[1].uid}`,
+    `wall:${initial.walls[0].uid}`,
+  ]);
+  editor.beginSelectionMove(100, 0);
+  const committed = editor.finishSelectionMove();
+
+  assert.equal(committed.towers.length, 4);
+  assert.equal(committed.walls.length, 2, "the mirrored towers must remain connected after placement");
+  const mirroredTowerIds = committed.towers.filter((tower) => tower.x === 900).map((tower) => tower.id).sort((a, b) => a - b);
+  const mirroredWall = committed.walls.find((wall) => mirroredTowerIds.includes(wall.t1) && mirroredTowerIds.includes(wall.t2));
+  assert.ok(mirroredWall, "a wall should connect the two newly created mirrored towers");
+});
+
 test("mirror-axis add, move, and removal participate in undo without entering object selection", () => {
   const editor = loadEditor();
   editor.importState(baseMap());

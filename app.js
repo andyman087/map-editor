@@ -41,6 +41,8 @@ const TEAM_LABELS = { "-1": "Neutral", "0": "Team Blue", "1": "Team Red" };
 const SESSION_STORAGE_KEY = "top_down_map_editor_session_v1";
 const PANEL_LAYOUT_STORAGE_KEY = "top_down_map_editor_panel_layout_v1";
 const MULTIPLAYER_USERNAME_KEY = "top_down_map_editor_username";
+const CUSTOM_SHAPES_STORAGE_KEY = "top_down_map_editor_custom_shapes_v1";
+const CUSTOM_SHAPES_FILE_TYPE = "cosmowar-custom-shapes";
 const MULTIPLAYER_COLLECTIONS = [
   { key: "map_boundaries", type: "boundary", prefix: "boundary" },
   { key: "map_holes", type: "hole", prefix: "hole" },
@@ -83,6 +85,22 @@ const el = {
   mapPresetWidth: document.getElementById("mapPresetWidth"),
   mapPresetHeight: document.getElementById("mapPresetHeight"),
   applyMapPresetBtn: document.getElementById("applyMapPresetBtn"),
+  customShapeNameInput: document.getElementById("customShapeNameInput"),
+  saveCustomShapeBtn: document.getElementById("saveCustomShapeBtn"),
+  customShapesList: document.getElementById("customShapesList"),
+  exportCustomShapesBtn: document.getElementById("exportCustomShapesBtn"),
+  importCustomShapesBtn: document.getElementById("importCustomShapesBtn"),
+  customShapesFileInput: document.getElementById("customShapesFileInput"),
+  deflyConversionPanel: document.getElementById("deflyConversionPanel"),
+  deflySpacingInput: document.getElementById("deflySpacingInput"),
+  deflyUnitSizeInput: document.getElementById("deflyUnitSizeInput"),
+  deflySpawnSizeInput: document.getElementById("deflySpawnSizeInput"),
+  deflyTowerClearanceInput: document.getElementById("deflyTowerClearanceInput"),
+  deflyBombClearanceInput: document.getElementById("deflyBombClearanceInput"),
+  deflyBoundaryPaddingInput: document.getElementById("deflyBoundaryPaddingInput"),
+  deflyConversionStatus: document.getElementById("deflyConversionStatus"),
+  finishDeflyConversionBtn: document.getElementById("finishDeflyConversionBtn"),
+  cancelDeflyConversionBtn: document.getElementById("cancelDeflyConversionBtn"),
   usernameInput: document.getElementById("usernameInput"),
   hostSessionBtn: document.getElementById("hostSessionBtn"),
   multiplayerToastStack: document.getElementById("multiplayerToastStack"),
@@ -108,6 +126,8 @@ let multiplayerManager = null;
 let panelResize = null;
 let activeValidationReport = null;
 let activeLiveMirrorPreviewModel = null;
+let conversionSession = null;
+let customShapes = [];
 const keyboardPanKeys = new Set();
 let lastFrameTime = null;
 
@@ -1330,6 +1350,7 @@ if (!globalThis.__COSMOWAR_EDITOR_TEST__) {
 
 function setup() {
   hydrateCountersFromState();
+  restoreCustomShapes();
   bindUI();
   setupPanelResizers();
   setupMultiplayer();
@@ -1352,6 +1373,7 @@ function setup() {
   if (!restoredViewFromSession) fitBoundaryInView();
   setMode("select");
   renderSelectionPanel();
+  renderCustomShapes();
   if (!updateInvalidObjectWarning()) setActionState("Idle", "idle");
   requestRender();
   window.addEventListener("resize", onWindowResize);
@@ -1624,6 +1646,25 @@ function bindUI() {
     commitMirrorAxesChange("CLEAR_MIRROR_AXES", () => { mirrorState.axes = []; }, "Mirror axes cleared");
   });
   el.applyMapPresetBtn.addEventListener("click", applySelectedMapPreset);
+  el.saveCustomShapeBtn?.addEventListener("click", saveSelectionAsCustomShape);
+  el.customShapeNameInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") saveSelectionAsCustomShape();
+  });
+  el.exportCustomShapesBtn?.addEventListener("click", exportCustomShapes);
+  el.importCustomShapesBtn?.addEventListener("click", () => el.customShapesFileInput.click());
+  el.customShapesFileInput?.addEventListener("change", importCustomShapes);
+
+  const conversionInputs = [
+    el.deflySpacingInput,
+    el.deflyUnitSizeInput,
+    el.deflySpawnSizeInput,
+    el.deflyTowerClearanceInput,
+    el.deflyBombClearanceInput,
+    el.deflyBoundaryPaddingInput,
+  ];
+  conversionInputs.forEach((input) => input?.addEventListener("input", updateDeflyConversionPreview));
+  el.finishDeflyConversionBtn?.addEventListener("click", finishDeflyConversion);
+  el.cancelDeflyConversionBtn?.addEventListener("click", cancelDeflyConversion);
 
   el.settingsToggleBtn.addEventListener("click", () => {
     setSettingsOpen(el.settingsPanel.classList.contains("hidden"));
@@ -1774,6 +1815,11 @@ function onMouseDown(event) {
     return;
   }
   if (event.button !== 0) return;
+
+  if (conversionSession) {
+    setActionState("Finish or cancel the Defly conversion before editing", "warn", true);
+    return;
+  }
 
   const world = interaction.mouseWorld;
   if (interaction.pasteDraft) {
@@ -2007,6 +2053,16 @@ function onWheel(event) {
 function onKeyDown(event) {
   const key = event.key.toLowerCase();
   const mod = event.ctrlKey || event.metaKey;
+  if (conversionSession && key === "escape" && !isTypingInFormControl()) {
+    event.preventDefault();
+    cancelDeflyConversion();
+    return;
+  }
+  if (conversionSession && !isTypingInFormControl() && (mod || key === "delete" || key === "backspace")) {
+    event.preventDefault();
+    setActionState("Finish or cancel the Defly conversion before editing", "warn", true);
+    return;
+  }
   interaction.snapTemporarilyDisabled = event.ctrlKey;
   if (["build", "boundary", "hole", "spawn", "bomb"].includes(interaction.mode)) {
     refreshPlacementPreviewFromMouse();
@@ -3107,6 +3163,18 @@ function moveHoleTo(hole, x, y) {
 }
 
 function copySelectionToClipboard() {
+  const clipboard = buildSelectionClipboard();
+  if (!clipboard) {
+    setActionState("No copyable objects selected", "warn", true);
+    return;
+  }
+  editorClipboard = clipboard;
+  startPasteDraft();
+  const count = getClipboardObjectCount(clipboard);
+  setActionState(`Copied ${count} object${count === 1 ? "" : "s"}`, "success", true);
+}
+
+function buildSelectionClipboard() {
   const entries = getSelectionEntries();
   const towerIds = new Set();
   const wallsByUid = new Map();
@@ -3139,8 +3207,7 @@ function copySelectionToClipboard() {
   ];
 
   if (!centers.length) {
-    setActionState("No copyable objects selected", "warn", true);
-    return;
+    return null;
   }
 
   const origin = centers.reduce((acc, point) => ({ x: acc.x + point.x, y: acc.y + point.y }), { x: 0, y: 0 });
@@ -3148,7 +3215,7 @@ function copySelectionToClipboard() {
   origin.y /= centers.length;
 
   const withOffset = (item) => ({ ...item, dx: item.x - origin.x, dy: item.y - origin.y });
-  editorClipboard = {
+  return {
     towers: towers.map(withOffset),
     spawns: spawns.map(withOffset),
     bombs: bombs.map(withOffset),
@@ -3156,8 +3223,298 @@ function copySelectionToClipboard() {
     walls: Array.from(wallsByUid.values()).filter((wall) => towerIds.has(wall.t1) && towerIds.has(wall.t2)),
     origin,
   };
+}
+
+function getClipboardObjectCount(clipboard) {
+  return ["towers", "spawns", "bombs", "structures", "walls"]
+    .reduce((total, key) => total + (Array.isArray(clipboard?.[key]) ? clipboard[key].length : 0), 0);
+}
+
+function normalizeCustomShapeClipboard(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Custom shape data must be an object.");
+  const list = (key) => {
+    if (!Array.isArray(value[key])) throw new Error(`Custom shape ${key} must be an array.`);
+    return value[key];
+  };
+  const offset = (item, path) => ({
+    dx: roundTo(expectNumber(item?.dx, `${path}.dx`), 3),
+    dy: roundTo(expectNumber(item?.dy, `${path}.dy`), 3),
+  });
+  const sortObjects = (items) => items.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const sourceTowerIds = new Set();
+  const towers = list("towers").map((tower, index) => {
+    const id = expectInteger(tower?.id, `towers[${index}].id`);
+    if (sourceTowerIds.has(id)) throw new Error(`Custom shape has duplicate tower ID ${id}.`);
+    sourceTowerIds.add(id);
+    return {
+      sourceId: id,
+      ...offset(tower, `towers[${index}]`),
+      team_id: expectInteger(tower?.team_id, `towers[${index}].team_id`),
+      health: clamp(1, Math.round(Number(tower?.health) || GAME.TOWER_MAX_HEALTH), GAME.TOWER_MAX_HEALTH),
+      is_invincible: Boolean(tower?.is_invincible),
+    };
+  });
+  towers.sort((a, b) => {
+    const aKey = JSON.stringify({ dx: a.dx, dy: a.dy, team_id: a.team_id, health: a.health, is_invincible: a.is_invincible });
+    const bKey = JSON.stringify({ dx: b.dx, dy: b.dy, team_id: b.team_id, health: b.health, is_invincible: b.is_invincible });
+    return aKey.localeCompare(bKey) || a.sourceId - b.sourceId;
+  });
+  const towerIdMap = new Map(towers.map((tower, index) => [tower.sourceId, index + 1]));
+  const normalizedTowers = towers.map((tower, index) => ({
+    id: index + 1,
+    dx: tower.dx,
+    dy: tower.dy,
+    team_id: tower.team_id,
+    health: tower.health,
+    is_invincible: tower.is_invincible,
+  }));
+  const spawns = sortObjects(list("spawns").map((spawn, index) => ({
+    ...offset(spawn, `spawns[${index}]`),
+    team_id: expectInteger(spawn?.team_id, `spawns[${index}].team_id`),
+  })));
+  const bombs = sortObjects(list("bombs").map((bomb, index) => ({
+    ...offset(bomb, `bombs[${index}]`),
+    site_letter: String(bomb?.site_letter || "A").slice(0, 4).toUpperCase(),
+  })));
+  const structures = sortObjects(list("structures").map((structure, index) => ({
+    ...offset(structure, `structures[${index}]`),
+    size: Math.max(1, expectNumber(structure?.size, `structures[${index}].size`)),
+    label: String(structure?.label || ""),
+    color: String(structure?.color || COLORS.concrete),
+    team_id: expectInteger(structure?.team_id, `structures[${index}].team_id`),
+  })));
+  const walls = sortObjects(list("walls").map((wall, index) => {
+    const mappedA = towerIdMap.get(expectInteger(wall?.t1, `walls[${index}].t1`));
+    const mappedB = towerIdMap.get(expectInteger(wall?.t2, `walls[${index}].t2`));
+    if (!mappedA || !mappedB) throw new Error(`Custom shape wall ${index} references a missing tower.`);
+    if (mappedA === mappedB) throw new Error(`Custom shape wall ${index} connects a tower to itself.`);
+    return {
+      t1: Math.min(mappedA, mappedB),
+      t2: Math.max(mappedA, mappedB),
+      team_id: expectInteger(wall?.team_id, `walls[${index}].team_id`),
+    };
+  }));
+  if (!getClipboardObjectCount({ towers: normalizedTowers, spawns, bombs, structures, walls })) {
+    throw new Error("Custom shape contains no supported objects.");
+  }
+  return { towers: normalizedTowers, spawns, bombs, structures, walls, origin: { x: 0, y: 0 } };
+}
+
+function getCustomShapeSignature(clipboard) {
+  return JSON.stringify(normalizeCustomShapeClipboard(clipboard));
+}
+
+function normalizeCustomShape(value, index = 0) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`custom_shapes[${index}] must be an object.`);
+  const name = String(value.name || "").trim().slice(0, 60);
+  if (!name) throw new Error(`custom_shapes[${index}].name is required.`);
+  const clipboard = normalizeCustomShapeClipboard(value.clipboard || value.shape || value.data);
+  return {
+    id: String(value.id || createUid("custom_shape")),
+    name,
+    createdAt: Number.isFinite(Number(value.createdAt)) ? Number(value.createdAt) : Date.now(),
+    clipboard,
+    signature: getCustomShapeSignature(clipboard),
+  };
+}
+
+function saveSelectionAsCustomShape() {
+  const name = String(el.customShapeNameInput?.value || "").trim().slice(0, 60);
+  if (!name) {
+    setActionState("Enter a name for the custom shape", "warn", true);
+    el.customShapeNameInput?.focus?.();
+    return false;
+  }
+  const source = buildSelectionClipboard();
+  if (!source) {
+    setActionState("Select at least one supported object first", "warn", true);
+    return false;
+  }
+  const clipboard = normalizeCustomShapeClipboard(source);
+  const signature = getCustomShapeSignature(clipboard);
+  if (customShapes.some((shape) => shape.signature === signature)) {
+    setActionState("That custom shape is already saved", "warn", true);
+    return false;
+  }
+  customShapes.push({ id: createUid("custom_shape"), name, createdAt: Date.now(), clipboard, signature });
+  persistCustomShapes();
+  renderCustomShapes();
+  el.customShapeNameInput.value = "";
+  setActionState(`Saved custom shape “${name}”`, "success", true);
+  return true;
+}
+
+function useCustomShape(id) {
+  if (conversionSession) {
+    setActionState("Finish or cancel the Defly conversion before placing a custom shape", "warn", true);
+    return false;
+  }
+  const shape = customShapes.find((item) => item.id === id);
+  if (!shape) return false;
+  editorClipboard = cloneState(shape.clipboard);
+  setMode("select");
   startPasteDraft();
-  setActionState(`Copied ${centers.length} object${centers.length === 1 ? "" : "s"}`, "success", true);
+  setActionState(`“${shape.name}” ready — left click to place`, "success", true);
+  return true;
+}
+
+function deleteCustomShape(id) {
+  const shape = customShapes.find((item) => item.id === id);
+  if (!shape || !confirm(`Delete custom shape “${shape.name}”?`)) return false;
+  customShapes = customShapes.filter((item) => item.id !== id);
+  persistCustomShapes();
+  renderCustomShapes();
+  setActionState(`Deleted custom shape “${shape.name}”`, "success", true);
+  return true;
+}
+
+function renderCustomShapes() {
+  if (!el.customShapesList) return;
+  el.customShapesList.innerHTML = "";
+  if (!customShapes.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted compact-note";
+    empty.textContent = "No custom shapes saved yet.";
+    el.customShapesList.appendChild(empty);
+  }
+  customShapes.forEach((shape) => {
+    const card = document.createElement("div");
+    card.className = "custom-shape-card";
+    const use = document.createElement("button");
+    use.type = "button";
+    use.className = "custom-shape-use";
+    const title = document.createElement("strong");
+    title.textContent = shape.name;
+    const meta = document.createElement("span");
+    const count = getClipboardObjectCount(shape.clipboard);
+    meta.textContent = `${count} item${count === 1 ? "" : "s"} · click to place`;
+    use.appendChild(title);
+    use.appendChild(meta);
+    use.addEventListener("click", () => useCustomShape(shape.id));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "custom-shape-delete";
+    remove.title = `Delete ${shape.name}`;
+    remove.setAttribute?.("aria-label", `Delete ${shape.name}`);
+    remove.textContent = "×";
+    remove.addEventListener("click", () => deleteCustomShape(shape.id));
+    card.appendChild(use);
+    card.appendChild(remove);
+    el.customShapesList.appendChild(card);
+  });
+  if (el.exportCustomShapesBtn) el.exportCustomShapesBtn.disabled = customShapes.length === 0;
+}
+
+function persistCustomShapes() {
+  try {
+    localStorage.setItem(CUSTOM_SHAPES_STORAGE_KEY, JSON.stringify({
+      type: CUSTOM_SHAPES_FILE_TYPE,
+      version: 1,
+      custom_shapes: customShapes.map(({ id, name, createdAt, clipboard }) => ({ id, name, createdAt, clipboard })),
+    }));
+  } catch (error) {
+    console.warn("Could not save custom shapes.", error);
+    setActionState("Could not save custom shapes locally", "warn", true);
+  }
+}
+
+function restoreCustomShapes() {
+  try {
+    const raw = localStorage.getItem(CUSTOM_SHAPES_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    const values = Array.isArray(parsed) ? parsed : parsed?.custom_shapes;
+    if (!Array.isArray(values)) return;
+    const seen = new Set();
+    customShapes = values.map(normalizeCustomShape).filter((shape) => {
+      if (seen.has(shape.signature)) return false;
+      seen.add(shape.signature);
+      return true;
+    });
+  } catch (error) {
+    console.warn("Could not restore custom shapes.", error);
+    customShapes = [];
+  }
+}
+
+function downloadJsonFile(payload, fileName) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function exportCustomShapes() {
+  if (!customShapes.length) {
+    setActionState("There are no custom shapes to export", "warn", true);
+    return;
+  }
+  downloadJsonFile({
+    type: CUSTOM_SHAPES_FILE_TYPE,
+    version: 1,
+    custom_shapes: customShapes.map(({ id, name, createdAt, clipboard }) => ({ id, name, createdAt, clipboard })),
+  }, "cosmowar-custom-shapes.json");
+  setActionState(`Exported ${customShapes.length} custom shape${customShapes.length === 1 ? "" : "s"}`, "success", true);
+}
+
+function getUniqueCustomShapeName(name) {
+  const existing = new Set(customShapes.map((shape) => shape.name.toLocaleLowerCase()));
+  if (!existing.has(name.toLocaleLowerCase())) return name;
+  let suffix = 2;
+  while (existing.has(`${name} (${suffix})`.toLocaleLowerCase())) suffix += 1;
+  return `${name} (${suffix})`;
+}
+
+function appendImportedCustomShapes(data) {
+  if (!data || typeof data !== "object") throw new Error("Custom shapes file must contain a JSON object.");
+  if (data.type && data.type !== CUSTOM_SHAPES_FILE_TYPE) throw new Error("This JSON file is not a Cosmowar custom-shapes export.");
+  const values = Array.isArray(data) ? data : data.custom_shapes;
+  if (!Array.isArray(values)) throw new Error("The file must contain a custom_shapes array.");
+  const normalizedValues = values.map((value, index) => normalizeCustomShape(value, index));
+  const signatures = new Set(customShapes.map((shape) => shape.signature));
+  let added = 0;
+  let duplicates = 0;
+  normalizedValues.forEach((shape) => {
+    if (signatures.has(shape.signature)) {
+      duplicates += 1;
+      return;
+    }
+    signatures.add(shape.signature);
+    shape.id = createUid("custom_shape");
+    shape.name = getUniqueCustomShapeName(shape.name);
+    customShapes.push(shape);
+    added += 1;
+  });
+  if (added) persistCustomShapes();
+  renderCustomShapes();
+  return { added, duplicates };
+}
+
+function importCustomShapes(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const result = appendImportedCustomShapes(JSON.parse(String(reader.result)));
+      setActionState(`Imported ${result.added} custom shape${result.added === 1 ? "" : "s"}; skipped ${result.duplicates} duplicate${result.duplicates === 1 ? "" : "s"}`, result.added ? "success" : "idle", true);
+    } catch (error) {
+      alert(`Custom shape import failed: ${error.message}`);
+      setActionState("Custom shape import failed", "error", true);
+    } finally {
+      el.customShapesFileInput.value = "";
+    }
+  };
+  reader.onerror = () => {
+    alert("Custom shape import failed: could not read file.");
+    el.customShapesFileInput.value = "";
+  };
+  reader.readAsText(file);
 }
 
 function startPasteDraft() {
@@ -4011,7 +4368,7 @@ function saveSession() {
   try {
     localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
       version: 1,
-      state,
+      state: conversionSession ? conversionSession.beforeState : state,
       history: {
         undo: history.undo.slice(-history.limit),
         redo: history.redo.slice(-history.limit),
@@ -4019,7 +4376,7 @@ function saveSession() {
       editorSettings,
       mirrorState: { axes: mirrorState.axes, liveEnabled: mirrorState.liveEnabled },
       defaults,
-      view,
+      view: conversionSession ? conversionSession.beforeView : view,
     }));
   } catch (error) {
     console.warn("Could not save map editor session.", error);
@@ -5078,6 +5435,112 @@ function validateForExport(mapState = state) {
   return report.issues.length ? `Validation error: ${report.issues[0].message}` : null;
 }
 
+function getDeflyConversionOptions() {
+  return {
+    spacingPercent: Number(el.deflySpacingInput.value),
+    unitSize: Number(el.deflyUnitSizeInput.value),
+    spawnProtectionSize: Number(el.deflySpawnSizeInput.value),
+    towerClearance: Number(el.deflyTowerClearanceInput.value),
+    bombClearance: Number(el.deflyBombClearanceInput.value),
+    boundaryPadding: Number(el.deflyBoundaryPaddingInput.value),
+  };
+}
+
+function beginDeflyConversion(contents, fileName = "Defly map") {
+  if (typeof convertDeflyMap !== "function") throw new Error("The Defly converter is unavailable.");
+  if (conversionSession) cancelDeflyConversion(false);
+  el.deflySpacingInput.value = "100";
+  el.deflyUnitSizeInput.value = "32";
+  el.deflySpawnSizeInput.value = String(Number(state.spawn_protection_size) || 500);
+  el.deflyTowerClearanceInput.value = "35.2";
+  el.deflyBombClearanceInput.value = "250";
+  el.deflyBoundaryPaddingInput.value = "1";
+  conversionSession = {
+    sourceText: String(contents),
+    fileName: String(fileName || "Defly map"),
+    beforeState: cloneState(state),
+    beforeView: { ...view },
+    valid: false,
+  };
+  el.deflyConversionPanel.classList.remove("hidden");
+  setSettingsOpen(false);
+  setMode("select");
+  updateDeflyConversionPreview();
+}
+
+function applyConversionPreviewState(nextState) {
+  state = nextState;
+  normalizeMapHolesInState();
+  normalizeTowerHealthInState();
+  selection.clear();
+  interaction.pasteDraft = null;
+  interaction.drag = null;
+  interaction.rotate = null;
+  interaction.resize = null;
+  hydrateCountersFromState();
+  renderSelectionPanel();
+  el.spawnProtectionInput.value = String(state.spawn_protection_size);
+  updateInvalidObjectWarning();
+  fitBoundaryInView();
+  requestRender();
+}
+
+function updateDeflyConversionPreview() {
+  if (!conversionSession) return false;
+  try {
+    const converted = convertDeflyMap(conversionSession.sourceText, getDeflyConversionOptions());
+    const preview = parseImportedState(converted);
+    conversionSession.valid = true;
+    conversionSession.previewState = cloneState(preview);
+    applyConversionPreviewState(preview);
+    const width = state.map_boundaries.length ? Math.max(...state.map_boundaries.map((point) => point.x)) - Math.min(...state.map_boundaries.map((point) => point.x)) : 0;
+    const height = state.map_boundaries.length ? Math.max(...state.map_boundaries.map((point) => point.y)) - Math.min(...state.map_boundaries.map((point) => point.y)) : 0;
+    el.deflyConversionStatus.classList.remove("error");
+    el.deflyConversionStatus.textContent = `${state.towers.length} towers · ${state.walls.length} walls · ${roundTo(width, 1)} × ${roundTo(height, 1)} map`;
+    el.finishDeflyConversionBtn.disabled = false;
+    setActionState("Defly conversion preview — adjust values or finish", "idle");
+    return true;
+  } catch (error) {
+    conversionSession.valid = false;
+    el.deflyConversionStatus.classList.add("error");
+    el.deflyConversionStatus.textContent = error.message;
+    el.finishDeflyConversionBtn.disabled = true;
+    setActionState(`Conversion setting error: ${error.message}`, "warn");
+    return false;
+  }
+}
+
+function finishDeflyConversion() {
+  if (!conversionSession || !conversionSession.valid) return false;
+  const session = conversionSession;
+  const after = cloneState(state);
+  conversionSession = null;
+  el.deflyConversionPanel.classList.add("hidden");
+  pushHistory("IMPORT_DEFLY", session.beforeState, after);
+  onStateChanged();
+  const report = getMapValidationReport();
+  if (report.issues.length) {
+    const additional = report.issues.length > 1 ? ` (+${report.issues.length - 1} more)` : "";
+    setActionState(`Defly conversion finished with validation issues: ${report.issues[0].message}${additional}`, "warn");
+  } else {
+    setActionState("Defly conversion finished", "success", true);
+  }
+  return true;
+}
+
+function cancelDeflyConversion(showMessage = true) {
+  if (!conversionSession) return false;
+  const previous = cloneState(conversionSession.beforeState);
+  const previousView = { ...conversionSession.beforeView };
+  conversionSession = null;
+  el.deflyConversionPanel.classList.add("hidden");
+  state = previous;
+  Object.assign(view, previousView);
+  onStateReplaced();
+  if (showMessage) setActionState("Defly conversion cancelled", "idle", true);
+  return true;
+}
+
 function importMap(event) {
   const file = event.target.files && event.target.files[0];
   if (!file) return;
@@ -5090,7 +5553,11 @@ function importMap(event) {
       const isJson = fileName.endsWith(".json");
       if (!isDeflyText && !isJson) throw new Error("Choose a .json or .txt map file.");
 
-      const parsed = isDeflyText ? convertDeflyMap(contents) : JSON.parse(contents);
+      if (isDeflyText) {
+        beginDeflyConversion(contents, file.name);
+        return;
+      }
+      const parsed = JSON.parse(contents);
       const convertedHealthCount = Array.isArray(parsed?.towers)
         ? parsed.towers.filter((tower) => Number(tower?.health) > GAME.TOWER_MAX_HEALTH).length
         : 0;
@@ -5103,7 +5570,7 @@ function importMap(event) {
       const conversionNote = convertedHealthCount
         ? ` Converted ${convertedHealthCount} tower${convertedHealthCount === 1 ? "" : "s"} from 5 HP to ${GAME.TOWER_MAX_HEALTH} HP.`
         : "";
-      const importLabel = isDeflyText ? "Defly TXT" : "JSON";
+      const importLabel = "JSON";
       if (report.issues.length) {
         const additional = report.issues.length > 1 ? ` (+${report.issues.length - 1} more)` : "";
         setActionState(`${importLabel} imported with validation issues.${conversionNote} ${report.issues[0].message}${additional}`, "warn");
@@ -5954,6 +6421,12 @@ function mirrorLiveWalls(beforeState, variants) {
   const beforeWalls = beforeState.walls || [];
   const beforeByUid = mapItemsByUid(beforeWalls);
   const currentByUid = mapItemsByUid(state.walls);
+  const beforeTowersByUid = mapItemsByUid(beforeState.towers || []);
+  const changedTowerIds = new Set();
+  state.towers.forEach((tower) => {
+    const previous = beforeTowersByUid.get(tower.uid);
+    if (!previous || previous.x !== tower.x || previous.y !== tower.y) changedTowerIds.add(tower.id);
+  });
   beforeWalls.forEach((wall) => {
     if (currentByUid.has(wall.uid)) return;
     variants.forEach((variant) => {
@@ -5961,7 +6434,7 @@ function mirrorLiveWalls(beforeState, variants) {
       if (counterpart) state.walls = state.walls.filter((item) => item.uid !== counterpart.uid);
     });
   });
-  state.walls.slice().forEach((wall) => {
+  state.walls.filter((wall) => changedTowerIds.has(wall.t1) || changedTowerIds.has(wall.t2)).forEach((wall) => {
     const previous = beforeByUid.get(wall.uid);
     if (!previous) {
       variants.forEach((variant) => createMirroredWall(wall, variant.axes));
@@ -5971,6 +6444,14 @@ function mirrorLiveWalls(beforeState, variants) {
     variants.forEach((variant) => {
       const counterpart = findMirroredWall(beforeState, previous, variant.axes, state);
       if (counterpart) counterpart.team_id = wall.team_id;
+    });
+  });
+  // Moving an existing connected group changes its tower endpoints but not the
+  // wall record itself. Reconcile every wall after towers have been mirrored so
+  // a previously missing counterpart wall is created between the new towers.
+  state.walls.slice().forEach((wall) => {
+    variants.forEach((variant) => {
+      if (!findMirroredWall(state, wall, variant.axes, state)) createMirroredWall(wall, variant.axes);
     });
   });
 }
@@ -6957,6 +7438,7 @@ if (globalThis.__COSMOWAR_EDITOR_TEST__) {
       history.redo = [];
       selection.clear();
       normalizeMapHolesInState();
+      hydrateCountersFromState();
       return cloneState(state);
     },
     getState: () => cloneState(state),
@@ -7116,6 +7598,27 @@ if (globalThis.__COSMOWAR_EDITOR_TEST__) {
       applyDrag({ x: start.x + Number(dx), y: start.y + Number(dy) });
       finishDrag();
       return true;
+    },
+    normalizeCustomShapeClipboard: (clipboard) => cloneState(normalizeCustomShapeClipboard(clipboard)),
+    importCustomShapes(data) {
+      const result = appendImportedCustomShapes(cloneState(data));
+      return { ...result, shapes: cloneState(customShapes) };
+    },
+    getCustomShapes: () => cloneState(customShapes),
+    clearCustomShapes() {
+      customShapes = [];
+      persistCustomShapes();
+      return [];
+    },
+    placeCustomShape(index, x, y) {
+      const shape = customShapes[index];
+      if (!shape) return false;
+      editorClipboard = cloneState(shape.clipboard);
+      interaction.pasteDraft = { clipboard: cloneState(editorClipboard), center: { x: Number(x), y: Number(y) }, angle: 0 };
+      updatePasteDraft(interaction.pasteDraft.center);
+      const valid = validatePasteDraft(interaction.pasteDraft).valid;
+      if (valid) commitPasteDraft();
+      return { valid, state: cloneState(state) };
     },
     beginSelectionMove(dx, dy) {
       const keys = getMovableSelectionKeys().length ? getMovableSelectionKeys() : getTransformableSelectionKeys();

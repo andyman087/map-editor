@@ -159,6 +159,86 @@ h1 {
   min-width: 0;
 }
 
+.custom-shapes-list {
+  display: grid;
+  gap: 7px;
+  margin: 2px 0 9px;
+  max-height: 230px;
+  overflow-y: auto;
+}
+
+.custom-shape-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid rgba(90, 128, 173, 0.38);
+  border-radius: 8px;
+  background: rgba(12, 26, 45, 0.72);
+}
+
+.custom-shape-use {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-main);
+  text-align: left;
+  cursor: pointer;
+}
+
+.custom-shape-use strong,
+.custom-shape-use span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.custom-shape-use span {
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-size: 0.76rem;
+}
+
+.custom-shape-delete {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid rgba(255, 94, 108, 0.42);
+  border-radius: 7px;
+  background: rgba(95, 37, 50, 0.72);
+  color: #ffd7dd;
+  cursor: pointer;
+}
+
+.custom-shape-transfer-actions {
+  margin-top: 4px;
+}
+
+.conversion-panel {
+  border-color: rgba(111, 207, 151, 0.72);
+  box-shadow: 0 0 0 1px rgba(111, 207, 151, 0.15) inset;
+}
+
+.conversion-status {
+  min-height: 42px;
+  margin: 3px 0 10px;
+  padding: 7px 8px;
+  border: 1px solid rgba(90, 128, 173, 0.4);
+  border-radius: 7px;
+  background: rgba(12, 26, 45, 0.78);
+  color: #cde2fb;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.conversion-status.error {
+  border-color: rgba(255, 94, 108, 0.72);
+  color: #ffd7dd;
+}
+
 .settings-section {
   margin: 10px 0;
   padding-top: 10px;

@@ -71,6 +71,22 @@
         <button id="applyMapPresetBtn" class="action-button" type="button">Use Preset Boundary</button>
       </section>
 
+      <section class="panel custom-shapes-panel">
+        <h2>Custom Shapes</h2>
+        <p class="muted compact-note">Save the selected towers, walls, spawns, bomb sites, and structures as a reusable group.</p>
+        <label class="field">
+          <span>Preset name</span>
+          <input id="customShapeNameInput" type="text" maxlength="60" placeholder="e.g. Fortified corner">
+        </label>
+        <button id="saveCustomShapeBtn" class="action-button" type="button">Save Selection</button>
+        <div id="customShapesList" class="custom-shapes-list" aria-live="polite"></div>
+        <div class="inline-actions custom-shape-transfer-actions">
+          <button id="exportCustomShapesBtn" class="action-button secondary" type="button">Export All</button>
+          <button id="importCustomShapesBtn" class="action-button secondary" type="button">Import</button>
+        </div>
+        <input type="file" id="customShapesFileInput" accept=".json,application/json" hidden>
+      </section>
+
       <section class="panel default-panel">
         <h2>Defaults</h2>
         <label class="field">
@@ -171,6 +187,24 @@
     <div id="rightResizeHandle" class="panel-resize-handle right-panel-handle" role="separator" aria-label="Resize right panel" aria-orientation="vertical"></div>
 
     <aside class="sidebar right-sidebar">
+      <section id="deflyConversionPanel" class="panel conversion-panel hidden" aria-label="Defly map conversion">
+        <h2>Convert Defly Map</h2>
+        <p class="muted compact-note">Adjust the conversion while the canvas updates live. Editing is paused until you finish or cancel.</p>
+        <label class="field"><span>Object spacing (%)</span><input id="deflySpacingInput" type="number" min="1" max="1000" step="1" value="100"></label>
+        <label class="field"><span>Defly unit size</span><input id="deflyUnitSizeInput" type="number" min="0.1" max="1000" step="0.1" value="32"></label>
+        <label class="field"><span>Spawn protection size</span><input id="deflySpawnSizeInput" type="number" min="1" max="10000" step="10" value="500"></label>
+        <div class="dimension-grid">
+          <label class="field"><span>Tower clearance</span><input id="deflyTowerClearanceInput" type="number" min="0" max="5000" step="0.1" value="35.2"></label>
+          <label class="field"><span>Bomb clearance</span><input id="deflyBombClearanceInput" type="number" min="0" max="5000" step="1" value="250"></label>
+        </div>
+        <label class="field"><span>Boundary padding</span><input id="deflyBoundaryPaddingInput" type="number" min="0" max="5000" step="1" value="1"></label>
+        <p id="deflyConversionStatus" class="conversion-status">Preparing preview…</p>
+        <div class="inline-actions">
+          <button id="finishDeflyConversionBtn" class="action-button" type="button">Finish</button>
+          <button id="cancelDeflyConversionBtn" class="action-button secondary" type="button">Cancel</button>
+        </div>
+      </section>
+
       <section class="panel">
         <h2>Selection</h2>
         <div id="selectionPanel" class="selection-panel">
@@ -191,6 +225,7 @@
           <li>Draw Hole: click vertices, then click the first vertex to close. Esc cancels.</li>
           <li>Hold Ctrl to temporarily disable object and grid snapping.</li>
           <li>Ctrl+C copies selection; left click places the ghost copy.</li>
+          <li>Save a selection under Custom Shapes to reuse it between maps and sessions.</li>
           <li>Drag the blue rotation handle to rotate a selected group.</li>
           <li>Drag a side or corner handle to scale; drag the dotted outline to move.</li>
           <li>Draw one or more mirror axes, then use live mode or mirror a selection once.</li>

@@ -2,28 +2,41 @@
  * Convert Defly map text into the target map-editor object.
  *
  * @param {string} deflyText Raw contents of a Defly .txt map.
- * @param {number} [scale=100] Spacing percentage: 100=normal, 50=half, 200=double.
+ * @param {number|object} [scale=100] Spacing percentage, or conversion options.
  * @param {number} [spawnProtectionSize=500] Target spawn-protection square size.
  * @returns {object} A JSON-serializable target map object.
  */
 function convertDeflyMap(deflyText, scale = 100, spawnProtectionSize = 500) {
   const SOURCE_SPAWN_SIZE = 9;
-  const BASE_COORDINATE_SCALE = 32;
-  const TARGET_TOWER_RADIUS = 35.2;
-  const TARGET_BOMB_RADIUS = 250;
-  const TARGET_BOUNDARY_MARGIN = 1;
+  const options = scale && typeof scale === "object" ? scale : {};
+  const BASE_COORDINATE_SCALE = Number(options.unitSize ?? options.coordinateScale ?? 32);
+  const TARGET_TOWER_RADIUS = Number(options.towerClearance ?? options.towerRadius ?? 35.2);
+  const TARGET_BOMB_RADIUS = Number(options.bombClearance ?? options.bombRadius ?? 250);
+  const TARGET_BOUNDARY_MARGIN = Number(options.boundaryPadding ?? options.boundaryMargin ?? 1);
 
   if (typeof deflyText !== "string") {
     throw new TypeError("deflyText must be a string.");
   }
 
-  scale = Number(scale);
-  spawnProtectionSize = Number(spawnProtectionSize);
+  scale = Number(options.spacingPercent ?? options.scale ?? (typeof scale === "number" ? scale : 100));
+  spawnProtectionSize = Number(options.spawnProtectionSize ?? spawnProtectionSize);
   if (!Number.isFinite(scale) || scale <= 0) {
     throw new Error("Scale must be a positive number.");
   }
   if (!Number.isFinite(spawnProtectionSize) || spawnProtectionSize <= 0) {
     throw new Error("Spawn protection size must be a positive number.");
+  }
+  if (!Number.isFinite(BASE_COORDINATE_SCALE) || BASE_COORDINATE_SCALE <= 0) {
+    throw new Error("Defly unit size must be a positive number.");
+  }
+  if (!Number.isFinite(TARGET_TOWER_RADIUS) || TARGET_TOWER_RADIUS < 0) {
+    throw new Error("Tower clearance cannot be negative.");
+  }
+  if (!Number.isFinite(TARGET_BOMB_RADIUS) || TARGET_BOMB_RADIUS < 0) {
+    throw new Error("Bomb clearance cannot be negative.");
+  }
+  if (!Number.isFinite(TARGET_BOUNDARY_MARGIN) || TARGET_BOUNDARY_MARGIN < 0) {
+    throw new Error("Boundary padding cannot be negative.");
   }
 
   const source = {
