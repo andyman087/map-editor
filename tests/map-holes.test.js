@@ -371,6 +371,77 @@ test("hole vertex selections mirror complete hole polygons and live edits update
   assert.equal(holes[1].points[0].y, 1000);
 });
 
+test("mirroring a half-map boundary removes the axis seam and preserves polygon topology", () => {
+  const editor = loadEditor();
+  editor.importState({
+    spawn_protection_size: 100,
+    map_boundaries: [
+      { x: -100, y: -100 },
+      { x: 0, y: -100 },
+      { x: 0, y: 0 },
+      { x: 0, y: 100 },
+      { x: -100, y: 100 },
+    ],
+    spawn_points: [],
+    bomb_sites: [],
+    towers: [],
+    walls: [],
+  });
+  const before = editor.getState();
+  const boundaryKeys = before.map_boundaries.map((point) => `boundary:${point.uid}`);
+  editor.setMirror([{ type: "reflect", a: { x: 0, y: -500 }, b: { x: 0, y: 500 } }]);
+  editor.selectKeys([boundaryKeys[2], boundaryKeys[4], boundaryKeys[0], boundaryKeys[3], boundaryKeys[1]]);
+
+  const mirrored = editor.mirrorSelectionOnce();
+  const axisPoints = mirrored.map_boundaries.filter((point) => Math.abs(point.x) <= 0.001);
+  const coordinates = new Set(mirrored.map_boundaries.map((point) => `${point.x}:${point.y}`));
+
+  assert.equal(mirrored.map_boundaries.length, 6);
+  assert.equal(axisPoints.length, 2, "the temporary closing seam should retain only its two outer endpoints");
+  assert.equal(geometry.polygonSelfIntersects(mirrored.map_boundaries), false);
+  assert.ok(Math.abs(geometry.polygonArea(mirrored.map_boundaries)) > 0);
+  ["-100:-100", "-100:100", "0:-100", "0:100", "100:-100", "100:100"].forEach((point) => {
+    assert.equal(coordinates.has(point), true, `mirrored boundary should contain ${point}`);
+  });
+  assert.equal(editor.validationMessages().includes("Map boundary intersects itself."), false);
+
+  editor.undo();
+  const restored = editor.getState().map_boundaries;
+  assert.equal(restored.length, before.map_boundaries.length);
+  assert.equal(geometry.polygonSelfIntersects(restored), false);
+  assert.deepEqual(
+    new Set(restored.map((point) => `${point.x}:${point.y}`)),
+    new Set(before.map_boundaries.map((point) => `${point.x}:${point.y}`)),
+    "undo may rotate the cyclic start index but must restore the same boundary polygon",
+  );
+});
+
+test("live mirroring inserts a new boundary counterpart into the matching edge", () => {
+  const editor = loadEditor();
+  editor.importState({
+    spawn_protection_size: 100,
+    map_boundaries: [
+      { x: -100, y: -100 }, { x: 100, y: -100 },
+      { x: 100, y: 100 }, { x: -100, y: 100 },
+    ],
+    spawn_points: [],
+    bomb_sites: [],
+    towers: [],
+    walls: [],
+  });
+  editor.setMirror([{ type: "reflect", a: { x: 0, y: -500 }, b: { x: 0, y: 500 } }], true);
+
+  const result = editor.placeBoundaryVertex(-50, -150);
+  const coordinates = result.state.map_boundaries.map(({ x, y }) => ({ x, y }));
+
+  assert.equal(result.changed, true);
+  assert.equal(result.state.map_boundaries.length, 6);
+  assert.equal(geometry.polygonSelfIntersects(result.state.map_boundaries), false);
+  assert.equal(coordinates.some((point) => point.x === -50 && point.y === -150), true);
+  assert.equal(coordinates.some((point) => point.x === 50 && point.y === -150), true);
+  assert.equal(editor.validationMessages().includes("Map boundary intersects itself."), false);
+});
+
 test("an in-progress hole draft exposes live mirrored vertices and edges before completion", () => {
   const editor = loadEditor();
   editor.importState(baseMap());

@@ -4649,6 +4649,21 @@ function getMapValidationReport(mapState = state) {
       "Map boundary must contain at least 3 points.",
       mapState.map_boundaries.map((item) => keyFor("boundary", item)),
     );
+  } else if (HOLE_GEOMETRY.distinctPointCount(mapState.map_boundaries) !== mapState.map_boundaries.length) {
+    addIssue(
+      "Map boundary contains duplicate vertices.",
+      mapState.map_boundaries.map((item) => keyFor("boundary", item)),
+    );
+  } else if (Math.abs(HOLE_GEOMETRY.polygonArea(mapState.map_boundaries)) <= HOLE_GEOMETRY.EPSILON) {
+    addIssue(
+      "Map boundary has zero area.",
+      mapState.map_boundaries.map((item) => keyFor("boundary", item)),
+    );
+  } else if (HOLE_GEOMETRY.polygonSelfIntersects(mapState.map_boundaries)) {
+    addIssue(
+      "Map boundary intersects itself.",
+      mapState.map_boundaries.map((item) => keyFor("boundary", item)),
+    );
   }
 
   const placementCollections = [
@@ -6515,6 +6530,164 @@ function getMirroredPointVariants(point, sourceAxes = mirrorState.axes) {
   return out;
 }
 
+function signedDistanceToMirrorAxis(point, axis) {
+  const dx = axis.b.x - axis.a.x;
+  const dy = axis.b.y - axis.a.y;
+  const length = Math.hypot(dx, dy);
+  if (length <= 0.000001) return 0;
+  return ((point.x - axis.a.x) * dy - (point.y - axis.a.y) * dx) / length;
+}
+
+function cleanPolygonPointSequence(points, epsilon = 0.01) {
+  const cleaned = [];
+  points.forEach((point) => {
+    const previous = cleaned[cleaned.length - 1];
+    if (!previous || distance(previous.x, previous.y, point.x, point.y) > epsilon) cleaned.push(point);
+  });
+  if (cleaned.length > 1 && distance(cleaned[0].x, cleaned[0].y, cleaned[cleaned.length - 1].x, cleaned[cleaned.length - 1].y) <= epsilon) {
+    cleaned.pop();
+  }
+  return cleaned;
+}
+
+function clipBoundaryToMirrorSide(points, axis, side, epsilon = 0.01) {
+  if (!points.length) return [];
+  const output = [];
+  let previous = points[points.length - 1];
+  let previousDistance = signedDistanceToMirrorAxis(previous, axis) * side;
+  let previousInside = previousDistance >= -epsilon;
+  points.forEach((current) => {
+    const currentDistance = signedDistanceToMirrorAxis(current, axis) * side;
+    const currentInside = currentDistance >= -epsilon;
+    if (currentInside !== previousInside) {
+      const denominator = previousDistance - currentDistance;
+      const t = Math.abs(denominator) <= 0.000001 ? 0 : clamp(0, previousDistance / denominator, 1);
+      output.push({
+        x: roundTo(previous.x + (current.x - previous.x) * t, 3),
+        y: roundTo(previous.y + (current.y - previous.y) * t, 3),
+      });
+    }
+    if (currentInside) output.push(current);
+    previous = current;
+    previousDistance = currentDistance;
+    previousInside = currentInside;
+  });
+  return cleanPolygonPointSequence(output, epsilon);
+}
+
+function polygonsHaveEquivalentOrder(first, second, epsilon = 0.01) {
+  if (first.length !== second.length || !first.length) return false;
+  const matchesAt = (offset, direction) => first.every((point, index) => {
+    const targetIndex = (offset + direction * index + second.length * 2) % second.length;
+    const target = second[targetIndex];
+    return distance(point.x, point.y, target.x, target.y) <= epsilon;
+  });
+  for (let offset = 0; offset < second.length; offset += 1) {
+    if (distance(first[0].x, first[0].y, second[offset].x, second[offset].y) > epsilon) continue;
+    if (matchesAt(offset, 1) || matchesAt(offset, -1)) return true;
+  }
+  return false;
+}
+
+function boundaryIsSymmetricAcrossAxis(points, axis, epsilon = 0.01) {
+  if (HOLE_GEOMETRY.polygonSelfIntersects(points)) return false;
+  const mirrored = points.map((point) => transformPointByAxis(point, axis));
+  return polygonsHaveEquivalentOrder(points, mirrored, epsilon);
+}
+
+function buildMirroredBoundaryAcrossAxis(points, selectedPoints, axis) {
+  const epsilon = 0.01;
+  const sideDistances = selectedPoints
+    .map((point) => signedDistanceToMirrorAxis(point, axis))
+    .filter((value) => Math.abs(value) > epsilon);
+  if (!sideDistances.length) {
+    return { changed: false, warning: "Selected boundary vertices lie on the mirror axis." };
+  }
+  const hasPositive = sideDistances.some((value) => value > 0);
+  const hasNegative = sideDistances.some((value) => value < 0);
+  if (hasPositive && hasNegative) {
+    if (boundaryIsSymmetricAcrossAxis(points, axis, epsilon)) return { changed: false, warning: "" };
+    return { changed: false, warning: "Select boundary vertices from only one side of each mirror axis." };
+  }
+  const side = hasPositive ? 1 : -1;
+  const clipped = clipBoundaryToMirrorSide(points, axis, side, epsilon);
+  if (clipped.length < 3) return { changed: false, warning: "The selected boundary side does not form a usable polygon." };
+
+  const offAxis = clipped.map((point) => Math.abs(signedDistanceToMirrorAxis(point, axis)) > epsilon);
+  const runStarts = offAxis.reduce((out, value, index) => {
+    const previous = offAxis[(index - 1 + offAxis.length) % offAxis.length];
+    if (value && !previous) out.push(index);
+    return out;
+  }, []);
+  if (runStarts.length !== 1) {
+    return { changed: false, warning: "The boundary must meet the mirror axis at one continuous seam." };
+  }
+  const runStart = runStarts[0];
+  const sourceChain = [clipped[(runStart - 1 + clipped.length) % clipped.length]];
+  let index = runStart;
+  while (offAxis[index]) {
+    sourceChain.push(clipped[index]);
+    index = (index + 1) % clipped.length;
+  }
+  sourceChain.push(clipped[index]);
+  if (sourceChain.length < 4) return { changed: false, warning: "The selected boundary side needs at least two off-axis vertices." };
+
+  const mirroredInterior = sourceChain.slice(1, -1).reverse().map((point) => {
+    const mirrored = transformPointByAxis(point, axis);
+    return { x: roundTo(mirrored.x, 3), y: roundTo(mirrored.y, 3) };
+  });
+  const coordinates = cleanPolygonPointSequence([
+    ...sourceChain.map((point) => ({ ...point, x: roundTo(point.x, 3), y: roundTo(point.y, 3) })),
+    ...mirroredInterior,
+  ], epsilon);
+  if (coordinates.length < 3
+    || HOLE_GEOMETRY.distinctPointCount(coordinates) !== coordinates.length
+    || Math.abs(HOLE_GEOMETRY.polygonArea(coordinates)) <= HOLE_GEOMETRY.EPSILON
+    || HOLE_GEOMETRY.polygonSelfIntersects(coordinates)) {
+    return { changed: false, warning: "Mirroring that boundary would create an invalid polygon." };
+  }
+  if (polygonsHaveEquivalentOrder(points, coordinates, epsilon)) return { changed: false, warning: "" };
+
+  const usedUids = new Set();
+  const createdKeys = [];
+  const next = coordinates.map((coordinate) => {
+    let existing = coordinate.uid ? points.find((point) => point.uid === coordinate.uid) : null;
+    if (!existing || usedUids.has(existing.uid)) {
+      existing = points.find((point) => !usedUids.has(point.uid)
+        && distance(point.x, point.y, coordinate.x, coordinate.y) <= epsilon);
+    }
+    if (existing) {
+      usedUids.add(existing.uid);
+      return { ...existing, x: coordinate.x, y: coordinate.y };
+    }
+    const created = { uid: createUid("boundary"), x: coordinate.x, y: coordinate.y };
+    usedUids.add(created.uid);
+    createdKeys.push(makeKey("boundary", created.uid));
+    return created;
+  });
+  return { changed: true, points: next, createdKeys, warning: "" };
+}
+
+function mirrorSelectedBoundary(sourceBoundaries, axes) {
+  if (!sourceBoundaries.length) return { changed: false, createdKeys: [], warnings: [] };
+  let changed = false;
+  const createdKeys = [];
+  const warnings = [];
+  axes.filter(isUsableMirrorAxis).forEach((axis) => {
+    if (axis.type !== "reflect") {
+      warnings.push("Outer boundaries cannot be duplicated around a rotational centre safely.");
+      return;
+    }
+    const result = buildMirroredBoundaryAcrossAxis(state.map_boundaries, sourceBoundaries, axis);
+    if (result.warning) warnings.push(result.warning);
+    if (!result.changed) return;
+    state.map_boundaries = result.points;
+    createdKeys.push(...result.createdKeys);
+    changed = true;
+  });
+  return { changed, createdKeys, warnings };
+}
+
 function mirrorSelectionOnce() {
   if (!mirrorState.axes.length) {
     setActionState("Draw at least one mirror axis first", "warn", true);
@@ -6535,7 +6708,8 @@ function mirrorSelectionOnce() {
   const sourceSpawns = entries.filter((entry) => entry.type === "spawn").map((entry) => entry.item);
   const sourceBombs = entries.filter((entry) => entry.type === "bomb").map((entry) => entry.item);
   const sourceStructures = entries.filter((entry) => entry.type === "structure").map((entry) => entry.item);
-  const sourceBoundaries = entries.filter((entry) => entry.type === "boundary").map((entry) => entry.item);
+  const selectedBoundaryUids = new Set(entries.filter((entry) => entry.type === "boundary").map((entry) => entry.item.uid));
+  const sourceBoundaries = state.map_boundaries.filter((point) => selectedBoundaryUids.has(point.uid));
   const sourceHoleUids = new Set();
   entries.forEach((entry) => {
     if (entry.type === "hole") sourceHoleUids.add(entry.item.uid);
@@ -6544,8 +6718,14 @@ function mirrorSelectionOnce() {
   const sourceHoles = state.map_holes.filter((hole) => sourceHoleUids.has(hole.uid));
   const variants = getMirrorTransformVariants();
   const createdKeys = [];
+  const boundaryWarnings = [];
+  let boundaryChanged = false;
 
   const changed = withAction("MIRROR_SELECTION", () => {
+    const boundaryResult = mirrorSelectedBoundary(sourceBoundaries, mirrorState.axes);
+    boundaryChanged = boundaryResult.changed;
+    createdKeys.push(...boundaryResult.createdKeys);
+    boundaryWarnings.push(...boundaryResult.warnings);
     variants.forEach((variant) => {
       const towerIdMap = new Map();
       sourceTowers.forEach((tower) => {
@@ -6611,25 +6791,24 @@ function mirrorSelectionOnce() {
         state.map_holes.push(clone);
         createdKeys.push(makeKey("hole", clone.uid));
       });
-      [...sourceBoundaries].reverse().forEach((boundary) => {
-        const point = transformPointByAxes(boundary, variant.axes);
-        if (distance(boundary.x, boundary.y, point.x, point.y) <= 0.001 || findPositionMatch(state.map_boundaries, point, boundary.uid)) return;
-        const clone = { uid: createUid("boundary"), x: roundTo(point.x, 3), y: roundTo(point.y, 3) };
-        state.map_boundaries.push(clone);
-        createdKeys.push(makeKey("boundary", clone.uid));
-      });
     });
-    if (!createdKeys.length) return false;
+    if (!createdKeys.length && !boundaryChanged) return false;
     selection.clear();
     createdKeys.forEach((key) => selection.add(key));
     return true;
   });
   if (!changed) {
-    setActionState("Selection lies on the axis or already has mirrored copies", "idle", true);
+    const warning = boundaryWarnings.find(Boolean);
+    setActionState(warning || "Selection lies on the axis or already has mirrored copies", warning ? "warn" : "idle", true);
     return;
   }
   renderSelectionPanel();
-  setActionState(`Created ${createdKeys.length} mirrored item${createdKeys.length === 1 ? "" : "s"}`, "success", true);
+  const warning = boundaryWarnings.find(Boolean);
+  setActionState(
+    warning || `Created ${createdKeys.length} mirrored item${createdKeys.length === 1 ? "" : "s"}`,
+    warning ? "warn" : "success",
+    true,
+  );
 }
 
 function applyLiveMirroring(beforeState) {
@@ -6707,6 +6886,12 @@ function createMirroredPositionItem(type, source, point, prepend = false) {
     }
   }
   if (type === "bomb") clone.site_letter = nextBombSiteLetter();
+  if (type === "boundary") {
+    const insertion = getSensiblePolygonInsertion(list, { x: clone.x, y: clone.y });
+    if (!insertion) return null;
+    list.splice(insertion.edgeIndex + 1, 0, clone);
+    return clone;
+  }
   if (prepend) list.unshift(clone);
   else list.push(clone);
   return clone;
