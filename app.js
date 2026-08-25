@@ -184,6 +184,7 @@ const interaction = {
   snapEnabled: true,
   mirrorDraft: null,
   mirrorAxisDrag: null,
+  selectedMirrorAxisIndex: null,
   holeDraft: null,
   guides: { x: null, y: null, xPoints: [], yPoints: [] },
 };
@@ -1732,6 +1733,7 @@ function resizeCanvas() {
 function setMode(mode) {
   if (mode !== "hole") interaction.holeDraft = null;
   cancelMirrorAxisDrag();
+  if (mode !== "select") interaction.selectedMirrorAxisIndex = null;
   interaction.mode = mode;
   interaction.drag = null;
   interaction.rotate = null;
@@ -2100,6 +2102,7 @@ function onKeyDown(event) {
     interaction.resize = null;
     interaction.mirrorDraft = null;
     cancelMirrorAxisDrag();
+    interaction.selectedMirrorAxisIndex = null;
     interaction.pasteDraft = null;
     interaction.guides = { x: null, y: null, xPoints: [], yPoints: [] };
     setActionState(cancelledHoleDraft ? "Incomplete hole cancelled" : "Draft actions cancelled", "idle", true);
@@ -2132,6 +2135,7 @@ function onKeyDown(event) {
   }
   if ((key === "delete" || key === "backspace") && !isTypingInFormControl()) {
     event.preventDefault();
+    if (deleteSelectedMirrorAxis()) return;
     deleteSelected();
   }
 }
@@ -2193,6 +2197,7 @@ function handleSelectDown(event, world) {
     event.preventDefault();
     return;
   }
+  interaction.selectedMirrorAxisIndex = null;
   const control = hitSelectionTransformControl(interaction.mouseScreen);
   if (control) {
     const transformable = getTransformableSelectionKeys();
@@ -2276,6 +2281,7 @@ function hitMirrorAxisIndex(screen) {
 function startMirrorAxisDrag(index, world) {
   const axis = mirrorState.axes[index];
   if (!axis) return;
+  interaction.selectedMirrorAxisIndex = index;
   interaction.mirrorAxisDrag = {
     index,
     startMouse: { ...world },
@@ -2310,7 +2316,9 @@ function finishMirrorAxisDrag() {
   const drag = interaction.mirrorAxisDrag;
   interaction.mirrorAxisDrag = null;
   if (!drag?.moved) {
+    setActionState("Mirror axis selected — press Delete to remove it", "idle", true);
     updateCursor();
+    requestRender();
     return;
   }
   pushMirrorAxesHistory("MOVE_MIRROR_AXIS", drag.beforeAxes, cloneState(mirrorState.axes));
@@ -2328,6 +2336,20 @@ function cancelMirrorAxisDrag() {
   interaction.mirrorAxisDrag = null;
   updateMirrorStatus();
   requestRender();
+}
+
+function deleteSelectedMirrorAxis() {
+  const index = interaction.selectedMirrorAxisIndex;
+  if (!Number.isInteger(index) || !mirrorState.axes[index]) {
+    interaction.selectedMirrorAxisIndex = null;
+    return false;
+  }
+  interaction.selectedMirrorAxisIndex = null;
+  return commitMirrorAxesChange(
+    "DELETE_MIRROR_AXIS",
+    () => mirrorState.axes.splice(index, 1),
+    "Mirror axis deleted",
+  );
 }
 
 function isKeyRepresentedBySelection(key) {
@@ -4257,6 +4279,10 @@ function pushMirrorAxesHistory(type, beforeAxes, afterAxes) {
 function commitMirrorAxesChange(type, mutator, message) {
   const beforeAxes = cloneState(mirrorState.axes);
   mutator();
+  if (!Number.isInteger(interaction.selectedMirrorAxisIndex)
+    || !mirrorState.axes[interaction.selectedMirrorAxisIndex]) {
+    interaction.selectedMirrorAxisIndex = null;
+  }
   const afterAxes = cloneState(mirrorState.axes);
   if (JSON.stringify(beforeAxes) === JSON.stringify(afterAxes)) return false;
   pushMirrorAxesHistory(type, beforeAxes, afterAxes);
@@ -4329,6 +4355,7 @@ function onStateReplaced() {
   interaction.boxSelect = null;
   interaction.mirrorDraft = null;
   interaction.mirrorAxisDrag = null;
+  interaction.selectedMirrorAxisIndex = null;
   interaction.holeDraft = null;
   interaction.guides = { x: null, y: null, xPoints: [], yPoints: [] };
   hydrateCountersFromState();
@@ -5748,6 +5775,7 @@ function drawMirrorAxes() {
   axes.forEach((axis, index) => {
     if (!isUsableMirrorAxis(axis)) return;
     const dragging = interaction.mirrorAxisDrag?.index === index && !axis.draft;
+    const selected = interaction.selectedMirrorAxisIndex === index && !axis.draft;
     const a = worldToScreen(axis.a.x, axis.a.y);
     const b = worldToScreen(axis.b.x, axis.b.y);
     const dx = b.x - a.x;
@@ -5758,15 +5786,15 @@ function drawMirrorAxes() {
     const extension = Math.hypot(viewport.width, viewport.height) * 2;
     ctx.save();
     ctx.setLineDash(axis.type === "rotate" ? [12, 8] : axis.draft ? [8, 6] : []);
-    ctx.lineWidth = dragging ? 3.25 : axis.draft ? 2.5 : 1.75;
-    ctx.strokeStyle = dragging ? "rgba(255, 255, 255, 0.98)" : axis.type === "rotate" ? "rgba(255, 128, 220, 0.9)" : "rgba(111, 207, 231, 0.88)";
+    ctx.lineWidth = dragging || selected ? 3.25 : axis.draft ? 2.5 : 1.75;
+    ctx.strokeStyle = dragging || selected ? "rgba(255, 255, 255, 0.98)" : axis.type === "rotate" ? "rgba(255, 128, 220, 0.9)" : "rgba(111, 207, 231, 0.88)";
     ctx.beginPath();
     ctx.moveTo(a.x - ux * extension, a.y - uy * extension);
     ctx.lineTo(b.x + ux * extension, b.y + uy * extension);
     ctx.stroke();
     const center = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
     ctx.setLineDash([]);
-    ctx.fillStyle = axis.type === "rotate" ? "#FF80DC" : "#6FCFE7";
+    ctx.fillStyle = selected ? "#FFFFFF" : axis.type === "rotate" ? "#FF80DC" : "#6FCFE7";
     ctx.beginPath();
     ctx.arc(center.x, center.y, axis.type === "rotate" ? 6 : 4, 0, Math.PI * 2);
     ctx.fill();
@@ -7640,8 +7668,27 @@ if (globalThis.__COSMOWAR_EDITOR_TEST__) {
     setMirror(axes, liveEnabled = false) {
       mirrorState.axes = cloneState(axes).filter(isUsableMirrorAxis);
       mirrorState.liveEnabled = Boolean(liveEnabled);
+      interaction.selectedMirrorAxisIndex = null;
     },
     getMirrorAxes: () => cloneState(mirrorState.axes),
+    getSelectedMirrorAxisIndex: () => interaction.selectedMirrorAxisIndex,
+    selectMirrorAxis(index) {
+      if (!mirrorState.axes[index]) return false;
+      interaction.selectedMirrorAxisIndex = index;
+      return true;
+    },
+    pressKey(key) {
+      let prevented = false;
+      onKeyDown({
+        key: String(key),
+        ctrlKey: false,
+        metaKey: false,
+        shiftKey: false,
+        altKey: false,
+        preventDefault() { prevented = true; },
+      });
+      return { prevented, axes: cloneState(mirrorState.axes) };
+    },
     addMirrorAxis(axis) {
       const beforeAxes = cloneState(mirrorState.axes);
       mirrorState.axes.push(cloneState(axis));

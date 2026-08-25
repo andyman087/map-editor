@@ -445,6 +445,23 @@ test("mirror-axis add, move, and removal participate in undo without entering ob
   assert.equal(editor.getMirrorAxes().length, 1, "undo should restore a removed mirror axis");
 });
 
+test("Delete removes the selected mirror axis and the removal can be undone", () => {
+  const editor = loadEditor();
+  editor.importState(baseMap());
+  const axis = { type: "reflect", a: { x: 1000, y: 0 }, b: { x: 1000, y: 3000 } };
+  editor.addMirrorAxis(axis);
+
+  assert.equal(editor.selectMirrorAxis(0), true);
+  assert.equal(editor.getSelectedMirrorAxisIndex(), 0);
+  const result = editor.pressKey("Delete");
+
+  assert.equal(result.prevented, true);
+  assert.equal(result.axes.length, 0, "Delete should remove the selected mirror axis");
+  assert.equal(editor.getSelectedMirrorAxisIndex(), null);
+  editor.undo();
+  assert.deepEqual(editor.getMirrorAxes(), [axis], "undo should restore the keyboard-deleted mirror axis");
+});
+
 test("grid and view settings survive a restored session", () => {
   const editor = loadEditor();
   editor.importState(baseMap());
