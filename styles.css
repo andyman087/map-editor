@@ -183,6 +183,16 @@
 #shellCurrent .custom-shape-transfer-actions {
   margin-top: 4px;
 }
+#shellCurrent .shape-thumb { display: none; }
+#shellCurrent .inspector-object-title { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+#shellCurrent .inspector-object-title span { color: var(--text-dim); }
+#shellCurrent .sect { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(90, 128, 173, 0.35); }
+#shellCurrent .sect-title { margin: 0 0 8px; color: #dbe8f7; font-size: .9rem; }
+#shellCurrent .rows { display: grid; gap: 8px; }
+#shellCurrent .row { display: grid; grid-template-columns: 82px minmax(0, 1fr); align-items: center; gap: 8px; }
+#shellCurrent .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+#shellCurrent .pair input { width: 100%; }
+#shellCurrent .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 #shellCurrent .conversion-panel {
   border-color: rgba(111, 207, 151, 0.72);
   box-shadow: 0 0 0 1px rgba(111, 207, 151, 0.15) inset;

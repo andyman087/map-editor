@@ -3,5 +3,8 @@
   "private": true,
   "scripts": {
     "test": "node --test"
+  },
+  "dependencies": {
+    "@phosphor-icons/core": "^2.1.1"
   }
 }
