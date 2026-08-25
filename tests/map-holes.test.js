@@ -153,6 +153,53 @@ test("hole creation, vertex editing, whole-hole movement, deletion, undo, and re
   assert.equal(editor.getState().map_holes.length, 0);
 });
 
+test("boundary authoring inserts on an existing edge and uses the closest sensible edge for expansion", () => {
+  const editor = loadEditor();
+  editor.importState(baseMap());
+
+  let result = editor.placeBoundaryVertex(4000, 1500);
+  assert.equal(result.changed, true);
+  assert.equal(result.state.map_boundaries.length, 5);
+  assert.deepEqual(
+    result.state.map_boundaries.map(({ x, y }) => ({ x, y })),
+    [
+      { x: 0, y: 0 }, { x: 4000, y: 0 }, { x: 4000, y: 1500 },
+      { x: 4000, y: 3000 }, { x: 0, y: 3000 },
+    ],
+  );
+
+  editor.undo();
+  result = editor.placeBoundaryVertex(2000, -500);
+  assert.equal(result.changed, true);
+  assert.deepEqual(
+    result.state.map_boundaries.map(({ x, y }) => ({ x, y })),
+    [
+      { x: 0, y: 0 }, { x: 2000, y: -500 }, { x: 4000, y: 0 },
+      { x: 4000, y: 3000 }, { x: 0, y: 3000 },
+    ],
+    "an off-edge point should connect to the nearest valid neighbouring vertices",
+  );
+});
+
+test("hole authoring inserts a vertex between the clicked edge endpoints and supports undo", () => {
+  const editor = loadEditor();
+  editor.importState(baseMap({ map_holes: [squareHole] }));
+
+  const result = editor.placeHoleVertex(1200, 1000);
+  assert.equal(result.changed, true);
+  assert.deepEqual(
+    result.state.map_holes[0].points.map(({ x, y }) => ({ x, y })),
+    [
+      { x: 1000, y: 1000 }, { x: 1200, y: 1000 }, { x: 1400, y: 1000 },
+      { x: 1400, y: 1400 }, { x: 1000, y: 1400 },
+    ],
+  );
+  assert.equal(editor.validationMessages().some((message) => message.includes("Hole 0")), false);
+
+  editor.undo();
+  assert.equal(editor.getState().map_holes[0].points.length, 4);
+});
+
 test("a legal hole is accepted", () => {
   const editor = loadEditor();
   editor.importState(baseMap({ map_holes: [squareHole] }));

@@ -1840,14 +1840,7 @@ function onMouseDown(event) {
     return;
   }
   if (interaction.mode === "boundary") {
-    const target = interaction.placementGhost && interaction.placementGhost.type === "boundary"
-      ? interaction.placementGhost
-      : getBoundaryPlacementPreview(world);
-    withAction("ADD_BOUNDARY_POINT", () => {
-      state.map_boundaries.push({ uid: createUid("boundary"), x: roundTo(target.x, 3), y: roundTo(target.y, 3) });
-      return true;
-    });
-    setActionState("Boundary vertex added", "success", true);
+    placeBoundaryVertex(world);
     return;
   }
   if (interaction.mode === "hole") {
@@ -1959,7 +1952,7 @@ function onMouseMove(event) {
   } else if (interaction.mode === "boundary") {
     interaction.buildGhost = null;
     const preview = getBoundaryPlacementPreview(world);
-    interaction.placementGhost = { type: "boundary", x: preview.x, y: preview.y, invalid: false };
+    interaction.placementGhost = { type: "boundary", ...preview };
     interaction.guides = {
       x: preview.guideX,
       y: preview.guideY,
@@ -1999,7 +1992,7 @@ function refreshPlacementPreviewFromMouse() {
   } else if (interaction.mode === "boundary") {
     interaction.buildGhost = null;
     const preview = getBoundaryPlacementPreview(world);
-    interaction.placementGhost = { type: "boundary", x: preview.x, y: preview.y, invalid: false };
+    interaction.placementGhost = { type: "boundary", ...preview };
     interaction.guides = {
       x: preview.guideX,
       y: preview.guideY,
@@ -3053,7 +3046,45 @@ function getBuildPlacementPreview(world, startTower = null) {
   return getSnapResult(world.x, world.y, exclude, { object: objectEnabled, grid: true });
 }
 
-function getBoundaryPlacementPreview(world) {
+function projectPointToSegment(point, a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const lengthSquared = dx * dx + dy * dy;
+  const t = lengthSquared <= 0.000001
+    ? 0
+    : clamp(0, ((point.x - a.x) * dx + (point.y - a.y) * dy) / lengthSquared, 1);
+  const x = a.x + t * dx;
+  const y = a.y + t * dy;
+  return { x, y, t, distance: distance(point.x, point.y, x, y) };
+}
+
+function getPolygonEdgeCandidates(points, point) {
+  if (!Array.isArray(points) || points.length < 2) return [];
+  return points.map((start, edgeIndex) => ({
+    edgeIndex,
+    start,
+    end: points[(edgeIndex + 1) % points.length],
+    projection: projectPointToSegment(point, start, points[(edgeIndex + 1) % points.length]),
+  })).sort((first, second) => first.projection.distance - second.projection.distance);
+}
+
+function getSensiblePolygonInsertion(points, point, preferredEdgeIndex = null) {
+  const candidates = getPolygonEdgeCandidates(points, point);
+  if (Number.isInteger(preferredEdgeIndex)) {
+    candidates.sort((first, second) => (first.edgeIndex === preferredEdgeIndex ? -1 : second.edgeIndex === preferredEdgeIndex ? 1 : 0));
+  }
+  for (const candidate of candidates) {
+    const next = points.slice();
+    next.splice(candidate.edgeIndex + 1, 0, point);
+    if (HOLE_GEOMETRY.distinctPointCount(next) !== next.length) continue;
+    if (Math.abs(HOLE_GEOMETRY.polygonArea(next)) <= HOLE_GEOMETRY.EPSILON) continue;
+    if (HOLE_GEOMETRY.polygonSelfIntersects(next)) continue;
+    return { edgeIndex: candidate.edgeIndex, points: next };
+  }
+  return null;
+}
+
+function getBoundarySnappedPoint(world) {
   if (interaction.snapTemporarilyDisabled) {
     return { x: world.x, y: world.y, guideX: null, guideY: null, xPoints: [], yPoints: [] };
   }
@@ -3084,7 +3115,95 @@ function getBoundaryPlacementPreview(world) {
   };
 }
 
+function getBoundaryPlacementPreview(world) {
+  const snapped = getBoundarySnappedPoint(world);
+  const points = state.map_boundaries;
+  if (points.length < 3) {
+    return { ...snapped, insertAfterIndex: points.length - 1, onEdge: false, invalid: false, invalidReason: "" };
+  }
+  const nearestEdge = getPolygonEdgeCandidates(points, world)[0];
+  const edgeThreshold = 12 / Math.max(view.scale, 0.0001);
+  const onEdge = Boolean(nearestEdge && nearestEdge.projection.distance <= edgeThreshold);
+  const target = onEdge
+    ? { x: nearestEdge.projection.x, y: nearestEdge.projection.y }
+    : { x: snapped.x, y: snapped.y };
+  const insertion = getSensiblePolygonInsertion(points, target, onEdge ? nearestEdge.edgeIndex : null);
+  return {
+    ...snapped,
+    x: target.x,
+    y: target.y,
+    insertAfterIndex: insertion?.edgeIndex ?? nearestEdge?.edgeIndex ?? points.length - 1,
+    onEdge,
+    invalid: !insertion,
+    invalidReason: insertion ? "" : "That point cannot be connected without crossing the existing boundary.",
+  };
+}
+
+function placeBoundaryVertex(world) {
+  const preview = getBoundaryPlacementPreview(world);
+  if (preview.invalid) {
+    setActionState(preview.invalidReason || "That boundary vertex cannot be inserted.", "warn", true);
+    return false;
+  }
+  let created = null;
+  const inserting = state.map_boundaries.length >= 3;
+  const changed = withAction(inserting ? "INSERT_BOUNDARY_VERTEX" : "ADD_BOUNDARY_POINT", () => {
+    created = { uid: createUid("boundary"), x: roundTo(preview.x, 3), y: roundTo(preview.y, 3) };
+    if (inserting) state.map_boundaries.splice(preview.insertAfterIndex + 1, 0, created);
+    else state.map_boundaries.push(created);
+    selection.clear();
+    selection.add(makeKey("boundary", created.uid));
+    return true;
+  });
+  if (!changed) return false;
+  renderSelectionPanel();
+  setActionState(inserting ? "Boundary vertex inserted" : "Boundary vertex added", "success", true);
+  return true;
+}
+
+function getExistingHoleEdgeInsertionPreview(world) {
+  if (interaction.holeDraft || !state.map_holes.length) return null;
+  const threshold = 12 / Math.max(view.scale, 0.0001);
+  let nearest = null;
+  state.map_holes.forEach((hole, holeIndex) => {
+    getPolygonEdgeCandidates(hole.points, world).forEach((candidate) => {
+      if (!nearest || candidate.projection.distance < nearest.projection.distance) {
+        nearest = { ...candidate, hole, holeIndex };
+      }
+    });
+  });
+  if (!nearest || nearest.projection.distance > threshold) return null;
+  const point = { x: roundTo(nearest.projection.x, 3), y: roundTo(nearest.projection.y, 3) };
+  const points = nearest.hole.points.slice();
+  points.splice(nearest.edgeIndex + 1, 0, { uid: "preview_hole_vertex", ...point });
+  let invalidReason = "";
+  if (HOLE_GEOMETRY.distinctPointCount(points) !== points.length) {
+    invalidReason = "Choose a position on the hole edge away from an existing vertex.";
+  } else if (HOLE_GEOMETRY.polygonSelfIntersects(points)) {
+    invalidReason = "That point would make the hole intersect itself.";
+  } else if (!HOLE_GEOMETRY.polygonStrictlyInsideBoundary(points, state.map_boundaries)) {
+    invalidReason = "Hole vertices must remain strictly inside the map boundary.";
+  } else if (state.map_holes.some((hole, index) => index !== nearest.holeIndex && HOLE_GEOMETRY.polygonsTouchOrOverlap(points, hole.points))) {
+    invalidReason = "Map holes cannot touch or overlap.";
+  }
+  return {
+    x: point.x,
+    y: point.y,
+    guideX: null,
+    guideY: null,
+    xPoints: [],
+    yPoints: [],
+    insertingExisting: true,
+    holeIndex: nearest.holeIndex,
+    insertAfterIndex: nearest.edgeIndex,
+    invalid: Boolean(invalidReason),
+    invalidReason,
+  };
+}
+
 function getHolePlacementPreview(world) {
+  const insertion = getExistingHoleEdgeInsertionPreview(world);
+  if (insertion) return insertion;
   const snapped = getPlacementSnapPreview(world);
   const draftPoints = interaction.holeDraft?.points || [];
   const first = draftPoints[0];
@@ -3103,9 +3222,14 @@ function isHoleAuthorPointAllowed(point) {
 }
 
 function handleHoleAuthorClick(world) {
-  const preview = interaction.placementGhost?.type === "hole"
+  const insertion = getExistingHoleEdgeInsertionPreview(world);
+  const preview = insertion || (interaction.placementGhost?.type === "hole"
     ? interaction.placementGhost
-    : getHolePlacementPreview(world);
+    : getHolePlacementPreview(world));
+  if (preview.insertingExisting) {
+    insertExistingHoleVertex(preview);
+    return;
+  }
   if (preview.closing) {
     finishHoleDraft();
     return;
@@ -5279,19 +5403,25 @@ function drawBombGhost(ghost) {
 
 function drawBoundaryGhost(ghost) {
   const p = worldToScreen(ghost.x, ghost.y);
-  const last = state.map_boundaries[state.map_boundaries.length - 1];
-  if (last) {
-    const s = worldToScreen(last.x, last.y);
-    ctx.strokeStyle = withAlpha(COLORS.guide, 0.65);
+  const complete = state.map_boundaries.length >= 3 && Number.isInteger(ghost.insertAfterIndex);
+  const connections = complete
+    ? [
+      state.map_boundaries[ghost.insertAfterIndex],
+      state.map_boundaries[(ghost.insertAfterIndex + 1) % state.map_boundaries.length],
+    ]
+    : [state.map_boundaries[state.map_boundaries.length - 1]].filter(Boolean);
+  connections.forEach((connection) => {
+    const s = worldToScreen(connection.x, connection.y);
+    ctx.strokeStyle = ghost.invalid ? withAlpha(COLORS.danger, 0.8) : withAlpha(COLORS.guide, 0.65);
     ctx.lineWidth = 2 * view.scale;
     ctx.beginPath();
     ctx.moveTo(s.x, s.y);
     ctx.lineTo(p.x, p.y);
     ctx.stroke();
-  }
+  });
   ctx.beginPath();
   ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
-  ctx.fillStyle = withAlpha(COLORS.guide, 0.82);
+  ctx.fillStyle = ghost.invalid ? COLORS.danger : withAlpha(COLORS.guide, 0.82);
   ctx.fill();
   ctx.strokeStyle = "#FFFFFF";
   ctx.lineWidth = 1.5;
@@ -5299,6 +5429,27 @@ function drawBoundaryGhost(ghost) {
 }
 
 function drawHoleGhost(ghost) {
+  if (ghost.insertingExisting) {
+    const hole = state.map_holes[ghost.holeIndex];
+    const start = hole?.points[ghost.insertAfterIndex];
+    const end = hole?.points[(ghost.insertAfterIndex + 1) % hole.points.length];
+    if (!start || !end) return;
+    const startScreen = worldToScreen(start.x, start.y);
+    const pointScreen = worldToScreen(ghost.x, ghost.y);
+    const endScreen = worldToScreen(end.x, end.y);
+    ctx.beginPath();
+    ctx.moveTo(startScreen.x, startScreen.y);
+    ctx.lineTo(pointScreen.x, pointScreen.y);
+    ctx.lineTo(endScreen.x, endScreen.y);
+    ctx.lineWidth = 3 * view.scale;
+    ctx.strokeStyle = ghost.invalid ? COLORS.danger : withAlpha(COLORS.guide, 0.9);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(pointScreen.x, pointScreen.y, 6, 0, Math.PI * 2);
+    ctx.fillStyle = ghost.invalid ? COLORS.danger : COLORS.guide;
+    ctx.fill();
+    return;
+  }
   const points = interaction.holeDraft?.points || [];
   const previewPoints = [...points, ...(ghost.closing ? [] : [{ x: ghost.x, y: ghost.y }])];
   if (!previewPoints.length) return;
@@ -5604,6 +5755,29 @@ function applyConversionPreviewState(nextState) {
   updateInvalidObjectWarning();
   fitBoundaryInView();
   requestRender();
+}
+
+function insertExistingHoleVertex(preview) {
+  if (preview.invalid) {
+    setActionState(preview.invalidReason || "That hole vertex cannot be inserted.", "warn", true);
+    return false;
+  }
+  const hole = state.map_holes[preview.holeIndex];
+  if (!hole || !hole.points[preview.insertAfterIndex]) return false;
+  let created = null;
+  const changed = withAction("INSERT_HOLE_VERTEX", () => {
+    created = { uid: createUid("hole_vertex"), x: roundTo(preview.x, 3), y: roundTo(preview.y, 3) };
+    hole.points.splice(preview.insertAfterIndex + 1, 0, created);
+    selection.clear();
+    selection.add(makeKey("holeVertex", created.uid));
+    return true;
+  });
+  if (!changed) return false;
+  interaction.placementGhost = null;
+  renderSelectionPanel();
+  refreshPlacementPreviewFromMouse();
+  setActionState("Hole vertex inserted", "success", true);
+  return true;
 }
 
 function updateDeflyConversionPreview() {
@@ -7608,11 +7782,24 @@ if (globalThis.__COSMOWAR_EDITOR_TEST__) {
     exportState: () => buildExportPayload(state),
     validationMessages: () => getMapValidationReport(state).issues.map((issue) => issue.message),
     isPlacementAllowed: (type, x, y) => isPlacementInsideBoundary(type, x, y),
+    placeBoundaryVertex(x, y) {
+      const previousSnapState = interaction.snapTemporarilyDisabled;
+      interaction.snapTemporarilyDisabled = true;
+      const changed = placeBoundaryVertex({ x: Number(x), y: Number(y) });
+      interaction.snapTemporarilyDisabled = previousSnapState;
+      return { changed, state: cloneState(state) };
+    },
     createHole(points) {
       const previousLength = state.map_holes.length;
       interaction.holeDraft = { points: points.map((point) => ({ x: Number(point.x), y: Number(point.y) })) };
       if (!finishHoleDraft()) return null;
       return state.map_holes[previousLength]?.uid || null;
+    },
+    placeHoleVertex(x, y) {
+      const beforeCount = state.map_holes.reduce((total, hole) => total + hole.points.length, 0);
+      handleHoleAuthorClick({ x: Number(x), y: Number(y) });
+      const afterCount = state.map_holes.reduce((total, hole) => total + hole.points.length, 0);
+      return { changed: afterCount === beforeCount + 1, state: cloneState(state) };
     },
     moveHoleVertex(holeIndex, vertexIndex, x, y) {
       return withAction("EDIT_HOLE_VERTEX", () => {
