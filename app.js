@@ -69,6 +69,7 @@ const el = {
   snapStrengthInput: document.getElementById("snapStrengthInput"),
   objectSnapEnabledInput: document.getElementById("objectSnapEnabledInput"),
   buildSnapEnabledInput: document.getElementById("buildSnapEnabledInput"),
+  moveSnapEnabledInput: document.getElementById("moveSnapEnabledInput"),
   gridSnapEnabledInput: document.getElementById("gridSnapEnabledInput"),
   gridVisibleInput: document.getElementById("gridVisibleInput"),
   gridSizeInput: document.getElementById("gridSizeInput"),
@@ -146,6 +147,7 @@ const editorSettings = {
   snapStrength: GAME.SNAP_THRESHOLD,
   objectSnapEnabled: true,
   buildModeSnapEnabled: true,
+  moveSnapEnabled: true,
   gridSnapEnabled: true,
   gridVisible: true,
   gridSize: 48,
@@ -1364,6 +1366,7 @@ function setup() {
   el.snapStrengthInput.value = String(editorSettings.snapStrength);
   el.objectSnapEnabledInput.checked = editorSettings.objectSnapEnabled;
   el.buildSnapEnabledInput.checked = editorSettings.buildModeSnapEnabled;
+  el.moveSnapEnabledInput.checked = editorSettings.moveSnapEnabled;
   el.gridSnapEnabledInput.checked = editorSettings.gridSnapEnabled;
   el.gridVisibleInput.checked = editorSettings.gridVisible;
   el.gridSizeInput.value = String(editorSettings.gridSize);
@@ -1375,6 +1378,7 @@ function setup() {
   el.towerHealthInput.max = String(GAME.TOWER_MAX_HEALTH);
   el.towerHealthInput.value = String(defaults.towerHealth);
   el.towerInvincibleInput.checked = defaults.towerInvincible;
+  syncDefaultTowerHealthAvailability();
   const previewTheme = new URLSearchParams(window.location.search).get("theme");
   globalThis.CosmowarUIShell?.setTheme(previewTheme === "light" || previewTheme === "dark" ? previewTheme : editorSettings.theme, false);
   resizeCanvas();
@@ -1458,6 +1462,7 @@ function syncNewShellUI() {
     "origin-axes": editorSettings.originAxesVisible,
     "grid-snap": editorSettings.gridSnapEnabled,
     "object-snap": editorSettings.objectSnapEnabled,
+    "move-snap": editorSettings.moveSnapEnabled,
     "build-snap": editorSettings.buildModeSnapEnabled,
   };
   Object.entries(toggles).forEach(([action, enabled]) => {
@@ -1465,6 +1470,7 @@ function syncNewShellUI() {
     item?.classList.toggle("checked", enabled);
     item?.setAttribute?.("aria-checked", String(enabled));
   });
+  shell.querySelectorAll?.("[data-grid-dependent]").forEach((item) => { item.hidden = !editorSettings.gridVisible; });
 }
 
 function queueRedraw() {
@@ -1596,6 +1602,7 @@ function bindUI() {
   });
   el.towerInvincibleInput.addEventListener("change", () => {
     defaults.towerInvincible = el.towerInvincibleInput.checked;
+    syncDefaultTowerHealthAvailability();
     saveSession();
   });
   el.makeAllTowersInvincibleBtn?.addEventListener("click", () => {
@@ -1670,6 +1677,12 @@ function bindUI() {
     el.gridLineWidthInput.value = String(editorSettings.gridLineWidth);
     saveSession();
     setActionState(`Grid line thickness: ${editorSettings.gridLineWidth}`, "success", true);
+    requestRender();
+  });
+  el.moveSnapEnabledInput.addEventListener("change", () => {
+    editorSettings.moveSnapEnabled = el.moveSnapEnabledInput.checked;
+    saveSession();
+    setActionState(`Snap while moving ${editorSettings.moveSnapEnabled ? "enabled" : "disabled"}`, "success", true);
     requestRender();
   });
   el.gridVisibleInput.addEventListener("change", () => {
@@ -1837,6 +1850,13 @@ function updateToolButtons() {
   document.querySelectorAll("#shellNew [data-tool-options]").forEach((panel) => {
     panel.hidden = panel.dataset.toolOptions !== interaction.mode;
   });
+}
+
+function syncDefaultTowerHealthAvailability() {
+  const disabled = Boolean(defaults.towerInvincible);
+  el.towerHealthInput.disabled = disabled;
+  document.querySelector?.('[data-mirror="towerHealthInput"]')?.toggleAttribute("disabled", disabled);
+  document.querySelectorAll?.("#shellNew .health-pip").forEach((pip) => { pip.disabled = disabled; });
 }
 
 function updateCursor() {
@@ -2565,11 +2585,12 @@ function applyDrag(world) {
   const rawDy = world.y - drag.startMouse.y;
   const targetX = anchorStart.x + rawDx;
   const targetY = anchorStart.y + rawDy;
-  const snap = isAnySnappingEnabled() && !interaction.snapTemporarilyDisabled
+  const moveSnappingActive = editorSettings.moveSnapEnabled && isAnySnappingEnabled() && !interaction.snapTemporarilyDisabled;
+  const snap = moveSnappingActive
     ? getDragSnapResult(drag, targetX, targetY, rawDx, rawDy)
     : { x: targetX, y: targetY, guideX: null, guideY: null, xPoints: [], yPoints: [] };
   const candidates = [snap];
-  if (editorSettings.gridSnapEnabled && !interaction.snapTemporarilyDisabled) {
+  if (editorSettings.moveSnapEnabled && editorSettings.gridSnapEnabled && !interaction.snapTemporarilyDisabled) {
     const grid = Math.max(4, Number(editorSettings.gridSize) || 48);
     const isGroup = drag.startPositions.size > 1;
     candidates.push({
@@ -2590,9 +2611,20 @@ function applyDrag(world) {
     const reason = getDragInvalidReason(drag, dx, dy);
     if (!reason) {
       chosen = { snap: candidate, dx, dy };
+      invalidReason = "";
       break;
     }
     invalidReason = reason;
+  }
+  const allowInvalidGroupPosition = drag.startPositions.size > 1;
+  if (!chosen && allowInvalidGroupPosition) {
+    const candidate = uniqueCandidates[0];
+    chosen = {
+      snap: candidate,
+      dx: candidate.x - anchorStart.x,
+      dy: candidate.y - anchorStart.y,
+    };
+    invalidReason = getDragInvalidReason(drag, chosen.dx, chosen.dy);
   }
   if (!chosen) {
     setActionState(invalidReason || "Cannot move selection there.", "warn");
@@ -2603,6 +2635,9 @@ function applyDrag(world) {
   drag.startPositions.forEach((pos, key) => setKeyPosition(key, roundTo(pos.x + dx, 3), roundTo(pos.y + dy, 3)));
   interaction.guides = { x: chosenSnap.guideX, y: chosenSnap.guideY, xPoints: chosenSnap.xPoints, yPoints: chosenSnap.yPoints };
   drag.moved = Math.hypot(dx, dy) > 0.001;
+  if (invalidReason && allowInvalidGroupPosition) {
+    setActionState(`${invalidReason} Invalid objects are shown in red.`, "warn");
+  }
   updateLiveSelectionCoordinates();
 }
 
@@ -3630,6 +3665,7 @@ function useCustomShape(id) {
   if (!shape) return false;
   editorClipboard = cloneState(shape.clipboard);
   setMode("select");
+  globalThis.CosmowarUIShell?.closeLibrary?.();
   startPasteDraft();
   setActionState(`“${shape.name}” ready — left click to place`, "success", true);
   return true;
@@ -4184,6 +4220,9 @@ function renderSelectionPanel() {
 function renderMultiSelection(entries) {
   const towerEntries = entries.filter((entry) => entry.type === "tower");
   const teamEditable = entries.filter((entry) => ["tower", "spawn", "wall", "structure"].includes(entry.type));
+  const selectedTeams = new Set(teamEditable.map((entry) => Number(entry.item.team_id)));
+  const commonTeam = selectedTeams.size === 1 ? Array.from(selectedTeams)[0] : null;
+  const allTowersInvincible = towerEntries.length > 0 && towerEntries.every((entry) => entry.item.is_invincible);
   const counts = entries.reduce((result, entry) => {
     result[entry.type] = (result[entry.type] || 0) + 1;
     return result;
@@ -4191,25 +4230,27 @@ function renderMultiSelection(entries) {
   el.selectionPanel.innerHTML = `
     ${selectionTypeRow("Multi Selection")}
     ${inspectorSection("Contents", `${inspectorField("Selected", `<span class="readonly">${entries.length}</span>`)}${Object.entries(counts).map(([type, count]) => inspectorField(type === "holeVertex" ? "Vertices" : `${type[0].toUpperCase()}${type.slice(1)}s`, `<span class="readonly">${count}</span>`)).join("")}`)}
-    ${teamEditable.length ? inspectorSection("Apply to all", `${teamSwatchMarkup(0, true)}<button id="applyMultiTeam" class="btn primary wide">Apply team</button>`) : ""}
-    ${towerEntries.length ? inspectorSection("Towers only", `${inspectorField("Health", `<input id="multiTowerHealth" type="number" step="1" min="1" max="${GAME.TOWER_MAX_HEALTH}" value="${GAME.TOWER_MAX_HEALTH}">`)}${inspectorField("Invincible", `<label class="switch"><input id="multiTowerInvincible" type="checkbox"><span class="switch-track"></span></label>`)}${towerEntries.length !== entries.length ? '<p class="muted">Other selected objects are left unchanged.</p>' : ""}<button id="applyMultiTowerProps" class="btn wide">Apply tower properties</button>`) : ""}
+    ${teamEditable.length ? inspectorSection("Apply to all", `${teamSwatchMarkup(commonTeam, true)}<button id="applyMultiTeam" class="btn primary wide" ${commonTeam == null ? "disabled" : ""}>Apply team</button>`) : ""}
+    ${towerEntries.length ? inspectorSection("Towers only", `${inspectorField("Health", `<input id="multiTowerHealth" type="number" step="1" min="1" max="${GAME.TOWER_MAX_HEALTH}" value="${GAME.TOWER_MAX_HEALTH}" ${allTowersInvincible ? "disabled" : ""}>`)}${inspectorField("Invincible", `<label class="switch"><input id="multiTowerInvincible" type="checkbox" ${allTowersInvincible ? "checked" : ""}><span class="switch-track"></span></label>`)}${towerEntries.length !== entries.length ? '<p class="muted">Other selected objects are left unchanged.</p>' : ""}<button id="applyMultiTowerProps" class="btn wide">Apply tower properties</button>`) : ""}
     ${inspectorSection("Snapping", snapToggleMarkup())}
     ${inspectorSection("Danger zone", '<button id="deleteMultiBtn" class="btn danger wide">Delete selection</button>', "destructive")}
   `;
   bindSnapToggle();
   const applyTeam = document.getElementById("applyMultiTeam");
   if (applyTeam) {
-    let selectedTeam = defaults.defaultTeam;
+    let selectedTeam = commonTeam;
     el.selectionPanel.querySelectorAll("[data-team-option]").forEach((btn) => {
       btn.classList.toggle("active", parseInt(btn.dataset.teamOption, 10) === selectedTeam);
     });
     bindTeamSwatchGroup(el.selectionPanel, selectedTeam, (nextTeam) => {
       selectedTeam = nextTeam;
+      applyTeam.disabled = false;
       el.selectionPanel.querySelectorAll("[data-team-option]").forEach((btn) => {
         btn.classList.toggle("active", parseInt(btn.dataset.teamOption, 10) === selectedTeam);
       });
     });
     applyTeam.addEventListener("click", () => {
+      if (selectedTeam == null) return;
       withAction("MASS_TEAM_EDIT", () => {
         let changed = false;
         const visitedTowerIds = new Set();
@@ -4224,14 +4265,18 @@ function renderMultiSelection(entries) {
   }
   const applyTower = document.getElementById("applyMultiTowerProps");
   if (applyTower) {
+    const healthInput = document.getElementById("multiTowerHealth");
+    const invincibleInput = document.getElementById("multiTowerInvincible");
+    invincibleInput.addEventListener("change", () => { healthInput.disabled = invincibleInput.checked; });
     applyTower.addEventListener("click", () => {
-      const health = clamp(1, Math.round(Number(document.getElementById("multiTowerHealth").value)), GAME.TOWER_MAX_HEALTH);
-      const inv = document.getElementById("multiTowerInvincible").checked;
+      const health = clamp(1, Math.round(Number(healthInput.value)), GAME.TOWER_MAX_HEALTH);
+      const inv = invincibleInput.checked;
       withAction("MASS_TOWER_EDIT", () => {
         let changed = false;
         towerEntries.forEach((entry) => {
-          if (entry.type === "tower" && (entry.item.health !== health || entry.item.is_invincible !== inv)) {
-            entry.item.health = health;
+          const nextHealth = inv ? entry.item.health : health;
+          if (entry.type === "tower" && (entry.item.health !== nextHealth || entry.item.is_invincible !== inv)) {
+            entry.item.health = nextHealth;
             entry.item.is_invincible = inv;
             changed = true;
           }
@@ -4251,14 +4296,17 @@ function renderTowerSelection(entry) {
     ${selectionTypeRow("Tower")}
     ${inspectorSection("Position", inspectorPositionFields("selTowerX", "selTowerY", tower.x, tower.y))}
     ${inspectorSection("Appearance", teamSwatchMarkup(tower.team_id, true))}
-    ${inspectorSection("Properties", `${inspectorField("Health", `<input id="selTowerHealth" type="number" step="1" max="${GAME.TOWER_MAX_HEALTH}" min="1" value="${tower.health}">`)}${inspectorField("Invincible", `<label class="switch"><input id="selTowerInv" type="checkbox" ${tower.is_invincible ? "checked" : ""}><span class="switch-track"></span></label>`)}${inspectorField("Snapping", snapToggleMarkup())}`)}
+    ${inspectorSection("Properties", `${inspectorField("Health", `<input id="selTowerHealth" type="number" step="1" max="${GAME.TOWER_MAX_HEALTH}" min="1" value="${tower.health}" ${tower.is_invincible ? "disabled" : ""}>`)}${inspectorField("Invincible", `<label class="switch"><input id="selTowerInv" type="checkbox" ${tower.is_invincible ? "checked" : ""}><span class="switch-track"></span></label>`)}${inspectorField("Snapping", snapToggleMarkup())}`)}
     ${inspectorSection("Danger zone", '<button id="deleteTowerBtn" class="btn danger wide">Delete tower</button>', "destructive")}
   `;
   bindTeamSwatchGroup(el.selectionPanel, tower.team_id, (nextTeam) => withAction("EDIT_TOWER", () => setConnectedComponentTeam(tower.id, nextTeam)));
   bindNumericChange("selTowerX", (v) => withAction("MOVE_TOWER", () => { tower.x = roundTo(v, 3); return true; }));
   bindNumericChange("selTowerY", (v) => withAction("MOVE_TOWER", () => { tower.y = roundTo(v, 3); return true; }));
   bindNumericChange("selTowerHealth", (v) => withAction("EDIT_TOWER", () => { tower.health = clamp(1, Math.round(v), GAME.TOWER_MAX_HEALTH); return true; }));
-  document.getElementById("selTowerInv").addEventListener("change", (e) => withAction("EDIT_TOWER", () => { tower.is_invincible = e.target.checked; return true; }));
+  document.getElementById("selTowerInv").addEventListener("change", (e) => {
+    document.getElementById("selTowerHealth").disabled = e.target.checked;
+    withAction("EDIT_TOWER", () => { tower.is_invincible = e.target.checked; return true; });
+  });
   bindSnapToggle();
   document.getElementById("deleteTowerBtn").addEventListener("click", deleteSelected);
 }
@@ -4600,6 +4648,9 @@ function restoreSavedSession() {
     }
     if (typeof saved?.editorSettings?.buildModeSnapEnabled === "boolean") {
       editorSettings.buildModeSnapEnabled = saved.editorSettings.buildModeSnapEnabled;
+    }
+    if (typeof saved?.editorSettings?.moveSnapEnabled === "boolean") {
+      editorSettings.moveSnapEnabled = saved.editorSettings.moveSnapEnabled;
     }
     if (typeof saved?.editorSettings?.objectSnapEnabled === "boolean") {
       editorSettings.objectSnapEnabled = saved.editorSettings.objectSnapEnabled;

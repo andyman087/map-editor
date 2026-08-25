@@ -124,6 +124,9 @@
 .brand-name {
   font-family: var(--ff-brand); font-weight: 600;
   font-size: 13.5px; letter-spacing: 0.02em; white-space: nowrap;
+  height: 26px; padding-right: 13px; margin-right: 5px;
+  display: inline-flex; align-items: center;
+  border-right: 1px solid var(--line);
 }
 .menubar { display: flex; gap: 1px; }
 .menu-btn {
@@ -765,6 +768,7 @@
     cursor: pointer;
   }
   .health-pip.active { border-color: var(--accent-dim); background: var(--accent-wash); color: var(--accent); }
+  .health-pip:disabled { opacity: .35; cursor: not-allowed; }
 
   .team-swatches {
     display: inline-flex;
@@ -819,21 +823,28 @@
   .inspector-header .ico { color: var(--accent); }
   .inspector-scroll { min-height: 0; overflow-y: auto; }
 
-  .status-message { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .statusbar { display: grid; grid-template-columns: minmax(140px, 1fr) max-content 164px 72px; padding-left: 8px; }
+  .status-message { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .status-message.success { color: var(--accent); }
   .status-message.warn { color: var(--warn); }
   .status-message.error { color: var(--danger); }
   .status-snapping { display: flex; align-items: center; gap: 5px; height: 27px; padding: 0 10px; border-left: 1px solid var(--line); color: var(--text-3); }
   .status-chip { display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 7px; border: 1px solid var(--line-2); border-radius: 4px; background: transparent; color: var(--text-3); cursor: pointer; }
   .status-chip.active { border-color: var(--accent-dim); background: var(--accent-wash); color: var(--accent); }
-  .status-coordinates { height: 27px; padding: 5px 10px 0; border-left: 1px solid var(--line); color: var(--text-2); font-family: var(--ff-mono); }
-  .status-zoom { display: inline-flex; align-items: center; gap: 5px; height: 27px; padding: 0 10px; border: 0; border-left: 1px solid var(--line); background: transparent; color: var(--text-2); cursor: pointer; }
+  .status-coordinates { width: 164px; height: 27px; padding: 5px 10px 0; border-left: 1px solid var(--line); color: var(--text-2); font-family: var(--ff-mono); text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .status-zoom { width: 72px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; height: 27px; padding: 0 7px; border: 0; border-left: 1px solid var(--line); background: transparent; color: var(--text-2); cursor: pointer; }
 
-  .shape-library { position: absolute; z-index: 30; inset: 0 auto 0 0; width: 280px; border-right: 1px solid var(--line); background: var(--surface); box-shadow: var(--shadow); }
+  .shape-library { position: absolute; z-index: 30; inset: 0 auto 0 0; width: 280px; display: flex; flex-direction: column; border-right: 1px solid var(--line); background: var(--surface); box-shadow: var(--shadow); }
   .shape-library > header { display: flex; align-items: center; justify-content: space-between; height: 40px; padding: 0 8px 0 12px; border-bottom: 1px solid var(--line); }
   .shape-library > header > span { display: flex; align-items: center; gap: 8px; font-weight: 600; }
-  .library-body { padding: 12px; }
+  .library-body { min-height: 0; padding: 12px; overflow-y: auto; }
   .library-name { display: grid; gap: 5px; margin-bottom: 8px; color: var(--text-2); }
+  .shape-list { margin-top: 10px; }
+  .custom-shape-card { cursor: default; }
+  .custom-shape-use { display: grid; gap: 2px; min-width: 0; margin: 0; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+  .custom-shape-use:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
+  .custom-shape-use .shape-name { color: var(--text); }
+  .custom-shape-use .shape-meta { color: var(--text-3); }
 
   .menu-popover { position: fixed; z-index: 60; min-width: 250px; padding: 5px; border: 1px solid var(--line-2); border-radius: var(--r-panel); background: var(--surface); box-shadow: var(--shadow); }
   .menu-popover > button { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 8px; width: 100%; min-height: 30px; padding: 4px 8px; border: 0; border-radius: 5px; background: transparent; color: var(--text-2); text-align: left; cursor: pointer; }
@@ -846,11 +857,12 @@
   .modal-scrim { position: fixed; z-index: 80; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(6, 10, 16, .65); }
   .settings-modal,
   .shortcuts-modal { width: min(760px, 100%); max-height: min(640px, 100%); overflow: hidden; border: 1px solid var(--line-2); border-radius: var(--r-panel); background: var(--surface); box-shadow: var(--shadow); }
+  .settings-modal { height: min(640px, calc(100vh - 48px)); display: grid; grid-template-rows: 46px minmax(0, 1fr); }
   .settings-modal > header,
   .shortcuts-modal > header { display: flex; align-items: center; gap: 10px; height: 46px; padding: 0 10px 0 16px; border-bottom: 1px solid var(--line); }
   .settings-modal h2,
   .shortcuts-modal h2 { flex: 1; margin: 0; font-size: 14px; }
-  .settings-layout { display: grid; grid-template-columns: 180px minmax(0, 1fr); max-height: 590px; }
+  .settings-layout { min-height: 0; display: grid; grid-template-columns: 180px minmax(0, 1fr); }
   .settings-layout > nav { display: flex; flex-direction: column; gap: 2px; padding: 10px; border-right: 1px solid var(--line); }
   .settings-tab { display: flex; align-items: center; gap: 8px; padding: 8px 9px; border: 0; border-radius: 5px; background: transparent; color: var(--text-2); text-align: left; cursor: pointer; }
   .settings-tab.active { background: var(--accent-wash); color: var(--accent); }

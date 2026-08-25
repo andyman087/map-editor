@@ -587,6 +587,7 @@ test("grid and view settings survive a restored session", () => {
     snapStrength: 73,
     objectSnapEnabled: false,
     buildModeSnapEnabled: false,
+    moveSnapEnabled: false,
     gridSnapEnabled: false,
     gridSize: 72,
     gridLineWidth: 2.5,
@@ -599,6 +600,7 @@ test("grid and view settings survive a restored session", () => {
 
   const restored = editor.restoreSession();
   assert.equal(restored.settings.snapStrength, 73);
+  assert.equal(restored.settings.moveSnapEnabled, false);
   assert.equal(restored.settings.gridSize, 72);
   assert.equal(restored.settings.gridLineWidth, 2.5);
   assert.equal(restored.settings.gridMajorVisible, false);
@@ -686,6 +688,37 @@ test("group snapping falls back to the legal pointer position instead of blockin
   editor.updateSettings({ snapStrength: 50, objectSnapEnabled: true, gridSnapEnabled: false }, false);
   editor.moveSelectionSnapped(-160, 0);
   assert.equal(editor.getState().towers[0].x, 40, "invalid snap to x=0 should fall back to the legal raw target");
+});
+
+test("multi-object moves may be committed in an obstructed position", () => {
+  const editor = loadEditor();
+  editor.importState(baseMap({
+    towers: [
+      { id: 1, team_id: 0, health: 4, is_invincible: false, x: 500, y: 1500 },
+      { id: 2, team_id: 0, health: 4, is_invincible: false, x: 700, y: 1500 },
+      { id: 3, team_id: 1, health: 4, is_invincible: false, x: 1000, y: 1500 },
+    ],
+  }));
+  const towers = editor.getState().towers;
+  editor.selectKeys([`tower:${towers[0].uid}`, `tower:${towers[1].uid}`]);
+  editor.moveSelection(500, 0);
+  assert.deepEqual(editor.getState().towers.map(({ x, y }) => ({ x, y })), [
+    { x: 1000, y: 1500 },
+    { x: 1200, y: 1500 },
+    { x: 1000, y: 1500 },
+  ]);
+});
+
+test("snap while moving can be disabled independently", () => {
+  const editor = loadEditor();
+  editor.importState(baseMap({
+    towers: [{ id: 1, team_id: 0, health: 4, is_invincible: false, x: 215, y: 1000 }],
+  }));
+  const tower = editor.getState().towers[0];
+  editor.selectKeys([`tower:${tower.uid}`]);
+  editor.updateSettings({ moveSnapEnabled: false, objectSnapEnabled: false, gridSnapEnabled: true, gridSize: 48 }, false);
+  editor.moveSelectionSnapped(10, 0);
+  assert.equal(editor.getState().towers[0].x, 225);
 });
 
 test("a snapped whole-map selection is validated against its moving boundary and holes", () => {
