@@ -2367,6 +2367,11 @@ function onKeyDown(event) {
     copySelectionToClipboard();
     return;
   }
+  if (mod && key === "x" && !isTypingInFormControl()) {
+    event.preventDefault();
+    cutSelectionToClipboard();
+    return;
+  }
   if (mod && key === "v" && !isTypingInFormControl()) {
     event.preventDefault();
     startPasteDraft();
@@ -3641,6 +3646,21 @@ function copySelectionToClipboard() {
   setActionState(`Copied ${count} object${count === 1 ? "" : "s"}`, "success", true);
 }
 
+function cutSelectionToClipboard() {
+  const entries = getSelectionEntries();
+  const clipboard = buildSelectionClipboard();
+  if (!clipboard) {
+    setActionState("No cuttable objects selected", "warn", true);
+    return;
+  }
+  editorClipboard = clipboard;
+  removeSelectionEntities(entries, entries.length > 1 ? "CUT_MULTI" : "CUT_SINGLE");
+  renderSelectionPanel();
+  startPasteDraft();
+  const count = getClipboardObjectCount(clipboard);
+  setActionState(`Cut ${count} object${count === 1 ? "" : "s"}`, "success", true);
+}
+
 function buildSelectionClipboard() {
   const entries = getSelectionEntries();
   const towerIds = new Set();
@@ -4666,16 +4686,9 @@ function bindNumericChange(id, cb) {
   });
 }
 
-function deleteSelected() {
-  const entries = getSelectionEntries();
-  if (!entries.length) return;
+function removeSelectionEntities(entries, actionType) {
   const towersToDelete = new Set(entries.filter((e) => e.type === "tower").map((e) => e.item.id));
-  const linkedWalls = state.walls.filter((w) => towersToDelete.has(w.t1) || towersToDelete.has(w.t2)).length;
-  if (entries.length > 1) {
-    const message = linkedWalls ? `Delete ${entries.length} selected items and ${linkedWalls} linked wall(s)?` : `Delete ${entries.length} selected items?`;
-    if (!confirm(message)) return;
-  }
-  withAction(entries.length > 1 ? "DELETE_MULTI" : "DELETE_SINGLE", () => {
+  return withAction(actionType, () => {
     const keys = new Set(entries.map((e) => e.key));
     const holesToDelete = new Set(entries.filter((entry) => entry.type === "hole").map((entry) => entry.item.uid));
     const verticesToDelete = new Set(entries.filter((entry) => entry.type === "holeVertex").map((entry) => entry.item.uid));
@@ -4692,6 +4705,18 @@ function deleteSelected() {
     selection.clear();
     return true;
   });
+}
+
+function deleteSelected() {
+  const entries = getSelectionEntries();
+  if (!entries.length) return;
+  const towersToDelete = new Set(entries.filter((e) => e.type === "tower").map((e) => e.item.id));
+  const linkedWalls = state.walls.filter((w) => towersToDelete.has(w.t1) || towersToDelete.has(w.t2)).length;
+  if (entries.length > 1) {
+    const message = linkedWalls ? `Delete ${entries.length} selected items and ${linkedWalls} linked wall(s)?` : `Delete ${entries.length} selected items?`;
+    if (!confirm(message)) return;
+  }
+  removeSelectionEntities(entries, entries.length > 1 ? "DELETE_MULTI" : "DELETE_SINGLE");
   renderSelectionPanel();
   setActionState("Selection deleted", "success", true);
 }
@@ -8611,6 +8636,7 @@ if (!globalThis.__COSMOWAR_EDITOR_TEST__) {
     undo: undoAction,
     redo: redoAction,
     copy: copySelectionToClipboard,
+    cut: cutSelectionToClipboard,
     paste: startPasteDraft,
     delete: deleteSelected,
     selectMatching: selectMatchingSelection,
@@ -8839,6 +8865,10 @@ if (globalThis.__COSMOWAR_EDITOR_TEST__) {
     },
     normalizeCustomShapeClipboard: (clipboard) => cloneState(normalizeCustomShapeClipboard(clipboard)),
     getSelectionClipboard: () => cloneState(buildSelectionClipboard()),
+    cutSelection() {
+      cutSelectionToClipboard();
+      return { state: cloneState(state), clipboard: cloneState(editorClipboard) };
+    },
     importCustomShapes(data) {
       const result = appendImportedCustomShapes(cloneState(data));
       return { ...result, shapes: cloneState(customShapes) };

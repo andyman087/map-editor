@@ -811,3 +811,39 @@ test("matching selection uses exact type, colour, health, and invincibility", ()
   assert.equal(selected.length, 2);
   assert.ok(selected.includes(`tower:${towers[1].uid}`));
 });
+
+test("cut removes the selection, fills the clipboard, and undoes as one step", () => {
+  const editor = loadEditor();
+  editor.importState({
+    spawn_protection_size: 100,
+    map_boundaries: [
+      { x: -2000, y: -1500 }, { x: 2000, y: -1500 }, { x: 2000, y: 1500 }, { x: -2000, y: 1500 },
+    ],
+    spawn_points: [{ team_id: 0, x: -1600, y: 0 }, { team_id: 1, x: 1600, y: 0 }],
+    bomb_sites: [],
+    towers: [
+      { id: 1, team_id: 0, health: 4, is_invincible: false, x: -1000, y: -300 },
+      { id: 2, team_id: 0, health: 4, is_invincible: false, x: -1000, y: 300 },
+      { id: 3, team_id: 1, health: 4, is_invincible: false, x: 1000, y: 300 },
+    ],
+    walls: [{ id: 1, t1: 1, t2: 2, team_id: 0 }],
+  });
+  const initial = editor.getState();
+  const before = editor.historyCounts().undo;
+
+  editor.selectKeys([`tower:${initial.towers[0].uid}`, `tower:${initial.towers[1].uid}`]);
+  const result = editor.cutSelection();
+
+  assert.equal(result.state.towers.length, 1, "cut removes the selected towers");
+  assert.equal(result.state.towers[0].id, 3, "objects outside the selection survive");
+  assert.equal(result.state.walls.length, 0, "the wall between two cut towers goes with them");
+  assert.equal(result.clipboard.towers.length, 2, "the cut objects land on the clipboard");
+  assert.equal(result.clipboard.walls.length, 1, "the connecting wall is carried too, so paste rebuilds it");
+  assert.equal(editor.getSelection().length, 0, "nothing stays selected after a cut");
+
+  assert.equal(editor.historyCounts().undo, before + 1, "a cut is a single undo entry");
+  editor.undo();
+  const restored = editor.getState();
+  assert.equal(restored.towers.length, 3, "undo brings the cut towers back");
+  assert.equal(restored.walls.length, 1, "undo brings the wall back");
+});
