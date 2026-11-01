@@ -19,6 +19,25 @@ const GAME = {
   MAX_ZOOM: 4,
 };
 
+// Optional map dimensions. Existing maps still use spawn_protection_size on both axes.
+function getSpawnDimensions(mapState = state) {
+  const legacy = Number(mapState.spawn_protection_size) > 0 ? Number(mapState.spawn_protection_size) : 500;
+  return {
+    width: mapState.spawn_protection_width === undefined ? legacy : Number(mapState.spawn_protection_width),
+    height: mapState.spawn_protection_height === undefined ? legacy : Number(mapState.spawn_protection_height),
+  };
+}
+
+function getBombRadius(site) {
+  return site?.radius === undefined ? GAME.BOMB_DIAMETER / 2 : Number(site.radius);
+}
+
+function expectPositiveSize(value, label) {
+  const number = expectNumber(value, label);
+  if (number <= 0) throw new Error(`${label} must be greater than zero.`);
+  return number;
+}
+
 const COLORS = {
   bg: "#0D0F17",
   terrain: "#0D0F17",
@@ -90,6 +109,8 @@ const el = {
   settingsCloseBtn: document.getElementById("settingsCloseBtn"),
   settingsPanel: document.getElementById("settingsPanel"),
   spawnProtectionInput: document.getElementById("spawnProtectionInput"),
+  spawnProtectionWidthInput: document.getElementById("spawnProtectionWidthInput"),
+  spawnProtectionHeightInput: document.getElementById("spawnProtectionHeightInput"),
   snapStrengthInput: document.getElementById("snapStrengthInput"),
   objectSnapEnabledInput: document.getElementById("objectSnapEnabledInput"),
   buildSnapEnabledInput: document.getElementById("buildSnapEnabledInput"),
@@ -1230,8 +1251,10 @@ class ActionValidator {
     const candidate = cloneState(currentState);
     const before = payload.before;
     const after = payload.after;
-    if (Number(before.spawn_protection_size) !== Number(after.spawn_protection_size)) {
-      candidate.spawn_protection_size = Number(after.spawn_protection_size);
+    for (const field of ["spawn_protection_size", "spawn_protection_width", "spawn_protection_height"]) {
+      if (before[field] === after[field]) continue;
+      if (after[field] === undefined) delete candidate[field];
+      else candidate[field] = Number(after[field]);
     }
 
     this.applyDeletes(candidate, before, after);
@@ -1313,7 +1336,10 @@ class ActionValidator {
     createByType("bomb").forEach((item) => {
       const uid = createUid("bomb");
       permanentIds.uids[item.uid] = uid;
-      candidate.bomb_sites.push({ uid, site_letter: String(item.site_letter || "A").toUpperCase(), x: Number(item.x), y: Number(item.y) });
+      candidate.bomb_sites.push({
+        uid, site_letter: String(item.site_letter || "A").toUpperCase(), x: Number(item.x), y: Number(item.y),
+        ...(item.radius === undefined ? {} : { radius: Number(item.radius) }),
+      });
     });
     createByType("tower").forEach((item) => {
       const uid = createUid("tower");
@@ -1377,7 +1403,12 @@ class ActionValidator {
       return { ...current, t1: Number(item.t1), t2: Number(item.t2), team_id: Number(item.team_id) };
     }
     if (type === "spawn") return { ...current, team_id: Number(item.team_id), x: Number(item.x), y: Number(item.y) };
-    if (type === "bomb") return { ...current, site_letter: String(item.site_letter || "A").toUpperCase(), x: Number(item.x), y: Number(item.y) };
+    if (type === "bomb") {
+      const updated = { ...current, site_letter: String(item.site_letter || "A").toUpperCase(), x: Number(item.x), y: Number(item.y) };
+      if (item.radius === undefined) delete updated.radius;
+      else updated.radius = Number(item.radius);
+      return updated;
+    }
     if (type === "boundary") return { ...current, x: Number(item.x), y: Number(item.y) };
     if (type === "hole") {
       return {
@@ -1405,6 +1436,12 @@ class ActionValidator {
 
   validateCandidate(candidate, previousState = null) {
     if (!this.isStateLike(candidate)) return "Candidate state is malformed.";
+    for (const field of ["spawn_protection_size", "spawn_protection_width", "spawn_protection_height"]) {
+      if (candidate[field] !== undefined && (!Number.isFinite(candidate[field]) || candidate[field] <= 0)) return `${field} must be a positive number.`;
+    }
+    for (const bomb of candidate.bomb_sites) {
+      if (bomb.radius !== undefined && (!Number.isFinite(bomb.radius) || bomb.radius <= 0)) return "Bomb radius must be a positive number.";
+    }
     const spawnTeams = new Map();
     for (const spawn of candidate.spawn_points) {
       if (spawn.team_id !== 0 && spawn.team_id !== 1) return "Spawn team must be Team Blue or Team Red.";
@@ -1522,6 +1559,7 @@ function setup() {
   hydrateCountersFromState();
   restoreCustomShapes();
   bindUI();
+  syncSpawnProtectionInputs();
   setupPanelResizers();
   setupMultiplayer();
   updateTeamSwatches();
@@ -1753,6 +1791,8 @@ function getPanelWidth(side) {
 function bindUI() {
   el.toolButtons.forEach((button) => button.addEventListener("click", () => setMode(button.dataset.tool)));
   el.spawnProtectionInput.addEventListener("change", onGlobalSpawnProtectionChange);
+  el.spawnProtectionWidthInput?.addEventListener("change", () => onSpawnAxisChange("width"));
+  el.spawnProtectionHeightInput?.addEventListener("change", () => onSpawnAxisChange("height"));
 
   el.teamSwatches.forEach((swatch) => {
     swatch.addEventListener("click", () => {
@@ -1952,10 +1992,18 @@ function onDocumentMouseDown(event) {
   setSettingsOpen(false);
 }
 
+function syncSpawnProtectionInputs() {
+  const dimensions = getSpawnDimensions(state);
+  el.spawnProtectionInput.value = String(state.spawn_protection_size);
+  if (el.spawnProtectionWidthInput) el.spawnProtectionWidthInput.value = String(dimensions.width);
+  if (el.spawnProtectionHeightInput) el.spawnProtectionHeightInput.value = String(dimensions.height);
+}
+
 function onGlobalSpawnProtectionChange() {
   const value = Number(el.spawnProtectionInput.value);
-  if (!Number.isFinite(value)) {
-    el.spawnProtectionInput.value = String(state.spawn_protection_size);
+  if (!Number.isFinite(value) || value <= 0) {
+    syncSpawnProtectionInputs();
+    setActionState("Spawn protection size must be positive", "warn", true);
     return;
   }
   withAction("UPDATE_GLOBAL", () => {
@@ -1963,6 +2011,23 @@ function onGlobalSpawnProtectionChange() {
     return true;
   });
   setActionState(`spawn_protection_size = ${value}`, "success", true);
+}
+
+function onSpawnAxisChange(axis, sourceInput = null) {
+  const input = sourceInput || (axis === "width" ? el.spawnProtectionWidthInput : el.spawnProtectionHeightInput);
+  if (!input) return;
+  const value = Number(input.value);
+  if (!Number.isFinite(value) || value <= 0) {
+    syncSpawnProtectionInputs();
+    renderSelectionPanel();
+    setActionState(`Spawn ${axis} must be positive`, "warn", true);
+    return;
+  }
+  withAction("UPDATE_GLOBAL", () => {
+    state[`spawn_protection_${axis}`] = roundTo(value, 3);
+    return true;
+  });
+  setActionState(`Spawn ${axis}: ${value} units`, "success", true);
 }
 
 function resizeCanvas() {
@@ -3123,7 +3188,7 @@ function getPlacementRestriction(type, x, y, item = null, mapState = state) {
     if (holeIndex >= 0) return `inside or on hole ${holeIndex}`;
   }
   if (type === "bomb") {
-    const holeIndex = HOLE_GEOMETRY.findCircleOverlappingHoleIndex({ x, y }, 250, mapState.map_holes);
+    const holeIndex = HOLE_GEOMETRY.findCircleOverlappingHoleIndex({ x, y }, getBombRadius(item), mapState.map_holes);
     if (holeIndex >= 0) return `overlapping hole ${holeIndex}`;
   }
   return "";
@@ -3773,6 +3838,7 @@ function normalizeCustomShapeClipboard(value) {
   const bombs = sortObjects(list("bombs").map((bomb, index) => ({
     ...offset(bomb, `bombs[${index}]`),
     site_letter: String(bomb?.site_letter || "A").slice(0, 4).toUpperCase(),
+    ...(bomb?.radius === undefined ? {} : { radius: expectPositiveSize(bomb.radius, `bombs[${index}].radius`) }),
   })));
   const structures = sortObjects(list("structures").map((structure, index) => ({
     ...offset(structure, `structures[${index}]`),
@@ -4204,7 +4270,10 @@ function commitPasteDraft() {
     });
 
     entities.bombs.forEach((bomb) => {
-      const pasted = { uid: createUid("bomb"), site_letter: String(bomb.site_letter || nextBombSiteLetter()).toUpperCase(), x: bomb.x, y: bomb.y };
+      const pasted = {
+        uid: createUid("bomb"), site_letter: String(bomb.site_letter || nextBombSiteLetter()).toUpperCase(), x: bomb.x, y: bomb.y,
+        ...(bomb.radius === undefined ? {} : { radius: bomb.radius }),
+      };
       state.bomb_sites.push(pasted);
       pastedKeys.push(makeKey("bomb", pasted.uid));
     });
@@ -4519,6 +4588,7 @@ function renderSpawnSelection(entry) {
     ${selectionTypeRow("Spawn")}
     ${inspectorSection("Position", inspectorPositionFields("selSpawnX", "selSpawnY", spawn.x, spawn.y))}
     ${inspectorSection("Appearance", teamSwatchMarkup(spawn.team_id, false))}
+    ${inspectorSection("Spawn area (both teams)", `${inspectorField("Width (X)", `<input id="selSpawnWidth" type="number" min="0.001" step="10" value="${getSpawnDimensions().width}">`)}${inspectorField("Height (Y)", `<input id="selSpawnHeight" type="number" min="0.001" step="10" value="${getSpawnDimensions().height}">`)}`)}
     ${inspectorSection("Properties", inspectorField("Snapping", snapToggleMarkup()))}
     ${inspectorSection("Danger zone", '<button id="deleteSpawnBtn" class="btn danger wide">Delete spawn</button>', "destructive")}
   `;
@@ -4533,6 +4603,8 @@ function renderSpawnSelection(entry) {
   });
   bindNumericChange("selSpawnX", (v) => withAction("MOVE_SPAWN", () => { spawn.x = roundTo(v, 3); return true; }));
   bindNumericChange("selSpawnY", (v) => withAction("MOVE_SPAWN", () => { spawn.y = roundTo(v, 3); return true; }));
+  document.getElementById("selSpawnWidth")?.addEventListener("change", (event) => onSpawnAxisChange("width", event.target));
+  document.getElementById("selSpawnHeight")?.addEventListener("change", (event) => onSpawnAxisChange("height", event.target));
   bindSnapToggle();
   document.getElementById("deleteSpawnBtn").addEventListener("click", deleteSelected);
 }
@@ -4542,11 +4614,20 @@ function renderBombSelection(entry) {
   el.selectionPanel.innerHTML = `
     ${selectionTypeRow("Bomb Site")}
     ${inspectorSection("Position", inspectorPositionFields("selBombX", "selBombY", bomb.x, bomb.y))}
-    ${inspectorSection("Properties", `${inspectorField("Site", `<span class="letter-chip">${bomb.site_letter}</span>`)}${inspectorField("Snapping", snapToggleMarkup())}`)}
+    ${inspectorSection("Properties", `${inspectorField("Site", `<span class="letter-chip">${bomb.site_letter}</span>`)}${inspectorField("Radius", `<input id="selBombRadius" type="number" min="0.001" step="10" value="${getBombRadius(bomb)}">`)}${inspectorField("Snapping", snapToggleMarkup())}`)}
     ${inspectorSection("Danger zone", '<button id="deleteBombBtn" class="btn danger wide">Delete bomb site</button>', "destructive")}
   `;
   bindNumericChange("selBombX", (v) => withAction("MOVE_BOMB", () => { bomb.x = roundTo(v, 3); return true; }));
   bindNumericChange("selBombY", (v) => withAction("MOVE_BOMB", () => { bomb.y = roundTo(v, 3); return true; }));
+  document.getElementById("selBombRadius")?.addEventListener("change", (event) => {
+    const radius = Number(event.target.value);
+    if (!Number.isFinite(radius) || radius <= 0) {
+      renderSelectionPanel();
+      setActionState("Bombsite radius must be positive", "warn", true);
+      return;
+    }
+    withAction("EDIT_BOMB", () => { bomb.radius = roundTo(radius, 3); return true; });
+  });
   bindSnapToggle();
   document.getElementById("deleteBombBtn").addEventListener("click", deleteSelected);
 }
@@ -4805,7 +4886,7 @@ function onStateChanged() {
   hydrateCountersFromState();
   sanitizeSelection();
   renderSelectionPanel();
-  el.spawnProtectionInput.value = String(state.spawn_protection_size);
+  syncSpawnProtectionInputs();
   updateInvalidObjectWarning();
   saveSession();
   requestRender();
@@ -4833,7 +4914,7 @@ function onStateReplaced() {
   hydrateCountersFromState();
   sanitizeSelection();
   renderSelectionPanel();
-  el.spawnProtectionInput.value = String(state.spawn_protection_size);
+  syncSpawnProtectionInputs();
   updateInvalidObjectWarning();
   saveSession();
   requestRender();
@@ -5003,6 +5084,16 @@ function getMapValidationReport(mapState = state) {
     issues.push({ message, keys: keys.filter(Boolean) });
   };
   const keyFor = (type, item) => item?.uid ? makeKey(type, item.uid) : null;
+  for (const field of ["spawn_protection_size", "spawn_protection_width", "spawn_protection_height"]) {
+    if (mapState[field] !== undefined && (!Number.isFinite(mapState[field]) || mapState[field] <= 0)) {
+      addIssue(`${field} must be a positive number.`, mapState.spawn_points.map((item) => keyFor("spawn", item)));
+    }
+  }
+  mapState.bomb_sites.forEach((bomb) => {
+    if (bomb.radius !== undefined && (!Number.isFinite(bomb.radius) || bomb.radius <= 0)) {
+      addIssue(`Bomb site ${bomb.site_letter} radius must be positive.`, [keyFor("bomb", bomb)]);
+    }
+  });
 
   if (mapState.map_boundaries.length < 3) {
     addIssue(
@@ -5428,18 +5519,20 @@ function drawSpawns() {
   state.spawn_points.forEach((spawn) => {
     if (isSuppressedLiveMirrorItem("spawn", spawn.uid)) return;
     const p = worldToScreen(spawn.x, spawn.y);
-    const spawnSize = Math.max(1, Number(state.spawn_protection_size) || 500);
-    const size = spawnSize * view.scale;
-    const half = size / 2;
+    const dims = getSpawnDimensions();
+    const width = dims.width * view.scale;
+    const height = dims.height * view.scale;
+    const halfWidth = width / 2;
+    const halfHeight = height / 2;
     const invalid = isObjectInvalid("spawn", spawn) || isActiveRotationInvalidKey(makeKey("spawn", spawn.uid));
     const color = invalid ? COLORS.danger : getTeamColor(spawn.team_id);
     ctx.lineWidth = 4 * view.scale;
     ctx.strokeStyle = color;
     ctx.fillStyle = color;
     ctx.globalAlpha = invalid ? 0.38 : 0.25;
-    ctx.fillRect(p.x - half, p.y - half, size, size);
+    ctx.fillRect(p.x - halfWidth, p.y - halfHeight, width, height);
     ctx.globalAlpha = 1.0;
-    ctx.strokeRect(p.x - half, p.y - half, size, size);
+    ctx.strokeRect(p.x - halfWidth, p.y - halfHeight, width, height);
 
     ctx.fillStyle = color;
     const iconSize = 20 * view.scale;
@@ -5450,7 +5543,7 @@ function drawSpawns() {
       const pad = 8 * view.scale;
       ctx.lineWidth = 3 * view.scale;
       ctx.strokeStyle = "#FFFFFF";
-      ctx.strokeRect(p.x - half - pad, p.y - half - pad, size + pad * 2, size + pad * 2);
+      ctx.strokeRect(p.x - halfWidth - pad, p.y - halfHeight - pad, width + pad * 2, height + pad * 2);
     }
   });
 }
@@ -5459,7 +5552,7 @@ function drawBombSites() {
   state.bomb_sites.forEach((bomb) => {
     if (isSuppressedLiveMirrorItem("bomb", bomb.uid)) return;
     const p = worldToScreen(bomb.x, bomb.y);
-    const radius = 250 * view.scale;
+    const radius = getBombRadius(bomb) * view.scale;
     const invalid = isObjectInvalid("bomb", bomb) || isActiveRotationInvalidKey(makeKey("bomb", bomb.uid));
     ctx.beginPath();
     ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
@@ -5683,23 +5776,25 @@ function drawPasteDraft() {
 
   entities.spawns.forEach((spawn) => {
     const p = worldToScreen(spawn.x, spawn.y);
-    const spawnSize = Math.max(1, Number(state.spawn_protection_size) || 500);
-    const size = spawnSize * view.scale;
-    const half = size / 2;
+    const dims = getSpawnDimensions();
+    const width = dims.width * view.scale;
+    const height = dims.height * view.scale;
+    const halfWidth = width / 2;
+    const halfHeight = height / 2;
     const color = invalid ? COLORS.danger : getTeamColor(spawn.team_id);
     ctx.fillStyle = color;
     ctx.strokeStyle = color;
     ctx.globalAlpha = invalid ? 0.35 : 0.22;
-    ctx.fillRect(p.x - half, p.y - half, size, size);
+    ctx.fillRect(p.x - halfWidth, p.y - halfHeight, width, height);
     ctx.globalAlpha = 0.9;
     ctx.lineWidth = 4 * view.scale;
-    ctx.strokeRect(p.x - half, p.y - half, size, size);
+    ctx.strokeRect(p.x - halfWidth, p.y - halfHeight, width, height);
     ctx.globalAlpha = 1.0;
   });
 
   entities.bombs.forEach((bomb) => {
     const p = worldToScreen(bomb.x, bomb.y);
-    const radius = 250 * view.scale;
+    const radius = getBombRadius(bomb) * view.scale;
     ctx.beginPath();
     ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
     ctx.lineWidth = 8 * view.scale;
@@ -5743,18 +5838,20 @@ function drawPasteDraft() {
 
 function drawSpawnGhost(ghost) {
   const p = worldToScreen(ghost.x, ghost.y);
-  const spawnSize = Math.max(1, Number(state.spawn_protection_size) || 500);
-  const size = spawnSize * view.scale;
-  const half = size / 2;
+  const dims = getSpawnDimensions();
+  const width = dims.width * view.scale;
+  const height = dims.height * view.scale;
+  const halfWidth = width / 2;
+  const halfHeight = height / 2;
   const color = ghost.invalid ? COLORS.danger : getTeamColor(defaults.defaultTeam);
 
   ctx.lineWidth = 4 * view.scale;
   ctx.strokeStyle = color;
   ctx.fillStyle = color;
   ctx.globalAlpha = ghost.invalid ? 0.35 : 0.22;
-  ctx.fillRect(p.x - half, p.y - half, size, size);
+  ctx.fillRect(p.x - halfWidth, p.y - halfHeight, width, height);
   ctx.globalAlpha = 0.9;
-  ctx.strokeRect(p.x - half, p.y - half, size, size);
+  ctx.strokeRect(p.x - halfWidth, p.y - halfHeight, width, height);
 
   const iconSize = 20 * view.scale;
   const iconHalf = iconSize / 2;
@@ -5765,7 +5862,7 @@ function drawSpawnGhost(ghost) {
 
 function drawBombGhost(ghost) {
   const p = worldToScreen(ghost.x, ghost.y);
-  const radius = 250 * view.scale;
+  const radius = getBombRadius(ghost) * view.scale;
   const stroke = ghost.invalid ? withAlpha(COLORS.danger, 0.85) : "rgba(51, 127, 229, 0.8)";
   const fill = ghost.invalid ? withAlpha(COLORS.danger, 0.2) : "rgba(51, 127, 229, 0.15)";
 
@@ -6019,6 +6116,8 @@ function createCleanRenderScene(mapState = state) {
     walls: (mapState.walls || []).map((item) => ({ ...item })),
     structures: (mapState.structures || []).map((item) => ({ ...item, x: Number(item.x), y: Number(item.y) })),
     spawnProtectionSize: Math.max(1, Number(mapState.spawn_protection_size) || 500),
+    spawnProtectionWidth: getSpawnDimensions(mapState).width,
+    spawnProtectionHeight: getSpawnDimensions(mapState).height,
   };
 }
 
@@ -6033,6 +6132,8 @@ function createClipboardRenderScene(clipboard) {
     walls: (clipboard?.walls || []).map((item) => ({ ...item })),
     structures: (clipboard?.structures || []).map(point),
     spawnProtectionSize: Math.max(1, Number(state.spawn_protection_size) || 500),
+    spawnProtectionWidth: getSpawnDimensions().width,
+    spawnProtectionHeight: getSpawnDimensions().height,
   };
 }
 
@@ -6055,8 +6156,8 @@ function getCleanRenderBounds(scene) {
     scene.boundary.forEach((point) => include(point.x, point.y));
     scene.holes.forEach((hole) => hole.points.forEach((point) => include(point.x, point.y)));
     scene.towers.forEach((tower) => include(tower.x, tower.y, GAME.TOWER_DIAMETER / 2));
-    scene.spawns.forEach((spawn) => include(spawn.x, spawn.y, scene.spawnProtectionSize / 2));
-    scene.bombs.forEach((bomb) => include(bomb.x, bomb.y, GAME.BOMB_DIAMETER / 2));
+    scene.spawns.forEach((spawn) => include(spawn.x, spawn.y, scene.spawnProtectionWidth / 2, scene.spawnProtectionHeight / 2));
+    scene.bombs.forEach((bomb) => include(bomb.x, bomb.y, getBombRadius(bomb)));
     scene.structures.forEach((structure) => include(structure.x, structure.y, Math.max(1, Number(structure.size) || 1) / 2));
   }
 
@@ -6120,18 +6221,19 @@ function renderCleanSceneToCanvas(targetCanvas, scene, options = {}) {
 
   scene.spawns.forEach((spawn) => {
     const p = screen(spawn);
-    const size = scene.spawnProtectionSize * scale;
+    const width = scene.spawnProtectionWidth * scale;
+    const height = scene.spawnProtectionHeight * scale;
     const color = teamColor(spawn.team_id);
     target.fillStyle = withAlpha(color, 0.12);
     target.strokeStyle = withAlpha(color, 0.72);
     target.lineWidth = Math.max(1, Math.min(3, 3 * scale));
-    target.fillRect(p.x - size / 2, p.y - size / 2, size, size);
-    target.strokeRect(p.x - size / 2, p.y - size / 2, size, size);
+    target.fillRect(p.x - width / 2, p.y - height / 2, width, height);
+    target.strokeRect(p.x - width / 2, p.y - height / 2, width, height);
   });
 
   scene.bombs.forEach((bomb) => {
     const p = screen(bomb);
-    const radius = (GAME.BOMB_DIAMETER / 2) * scale;
+    const radius = getBombRadius(bomb) * scale;
     target.beginPath();
     target.arc(p.x, p.y, radius, 0, Math.PI * 2);
     target.fillStyle = "rgba(51, 127, 229, 0.13)";
@@ -6293,7 +6395,10 @@ function buildExportPayload(exportState) {
     spawn_protection_size: Number(exportState.spawn_protection_size),
     map_boundaries: exportState.map_boundaries.map((point) => ({ x: roundTo(point.x, 3), y: roundTo(point.y, 3) })),
     spawn_points: exportState.spawn_points.map((spawn) => ({ team_id: spawn.team_id, x: roundTo(spawn.x, 3), y: roundTo(spawn.y, 3) })).sort((a, b) => a.team_id - b.team_id),
-    bomb_sites: exportState.bomb_sites.map((bomb) => ({ site_letter: String(bomb.site_letter || "A").toUpperCase(), x: roundTo(bomb.x, 3), y: roundTo(bomb.y, 3) })),
+    bomb_sites: exportState.bomb_sites.map((bomb) => ({
+      site_letter: String(bomb.site_letter || "A").toUpperCase(), x: roundTo(bomb.x, 3), y: roundTo(bomb.y, 3),
+      ...(bomb.radius === undefined ? {} : { radius: roundTo(bomb.radius, 3) }),
+    })),
     towers: [...exportState.towers].sort((a, b) => a.id - b.id).map((tower) => ({
       id: tower.id,
       team_id: tower.team_id,
@@ -6304,6 +6409,10 @@ function buildExportPayload(exportState) {
     })),
     walls: exportState.walls.map((wall) => ({ t1: wall.t1, t2: wall.t2, team_id: wall.team_id })),
   };
+  for (const axis of ["width", "height"]) {
+    const key = `spawn_protection_${axis}`;
+    if (exportState[key] !== undefined) payload[key] = roundTo(exportState[key], 3);
+  }
   HOLE_GEOMETRY.addMapHolesToPayload(payload, exportState.map_holes, (value) => roundTo(value, 3));
   if (exportState.structures.length) {
     payload.structures = exportState.structures.map((structure) => ({
@@ -6393,7 +6502,7 @@ function applyConversionPreviewState(nextState) {
   interaction.resize = null;
   hydrateCountersFromState();
   renderSelectionPanel();
-  el.spawnProtectionInput.value = String(state.spawn_protection_size);
+  syncSpawnProtectionInputs();
   updateInvalidObjectWarning();
   fitBoundaryInView();
   requestRender();
@@ -6540,11 +6649,15 @@ function parseImportedState(data) {
   const wallsRaw = expectArray(data.walls, "walls");
   const structRaw = Array.isArray(data.structures) ? data.structures : [];
   const imported = {
-    spawn_protection_size: expectNumber(data.spawn_protection_size, "spawn_protection_size"),
+    spawn_protection_size: expectPositiveSize(data.spawn_protection_size, "spawn_protection_size"),
     map_boundaries: mapRaw.map((p, i) => ({ uid: createUid("boundary"), x: expectNumber(p?.x, `map_boundaries[${i}].x`), y: expectNumber(p?.y, `map_boundaries[${i}].y`) })),
     map_holes: holes,
     spawn_points: spawnRaw.map((s, i) => ({ uid: createUid("spawn"), team_id: expectInteger(s?.team_id, `spawn_points[${i}].team_id`), x: expectNumber(s?.x, `spawn_points[${i}].x`), y: expectNumber(s?.y, `spawn_points[${i}].y`) })),
-    bomb_sites: bombRaw.map((b, i) => ({ uid: createUid("bomb"), site_letter: expectString(b?.site_letter, `bomb_sites[${i}].site_letter`).toUpperCase(), x: expectNumber(b?.x, `bomb_sites[${i}].x`), y: expectNumber(b?.y, `bomb_sites[${i}].y`) })),
+    bomb_sites: bombRaw.map((b, i) => ({
+      uid: createUid("bomb"), site_letter: expectString(b?.site_letter, `bomb_sites[${i}].site_letter`).toUpperCase(),
+      x: expectNumber(b?.x, `bomb_sites[${i}].x`), y: expectNumber(b?.y, `bomb_sites[${i}].y`),
+      ...(b?.radius === undefined ? {} : { radius: expectPositiveSize(b.radius, `bomb_sites[${i}].radius`) }),
+    })),
     towers: towersRaw.map((t, i) => ({
       uid: createUid("tower"),
       id: expectInteger(t?.id, `towers[${i}].id`),
@@ -6567,6 +6680,10 @@ function parseImportedState(data) {
     })),
   };
 
+  for (const axis of ["width", "height"]) {
+    const key = `spawn_protection_${axis}`;
+    if (data[key] !== undefined) imported[key] = expectPositiveSize(data[key], key);
+  }
   const spawnCounts = new Map();
   imported.spawn_points.forEach((s) => {
     if (s.team_id !== 0 && s.team_id !== 1) throw new Error(`spawn_points includes invalid team_id ${s.team_id}`);
@@ -6943,12 +7060,14 @@ function drawMirrorPreviewEntity(type, item, point) {
     ctx.fill();
     ctx.stroke();
   } else if (type === "spawn") {
-    const size = (Number(state.spawn_protection_size) || 500) * view.scale;
-    ctx.fillRect(p.x - size / 2, p.y - size / 2, size, size);
-    ctx.strokeRect(p.x - size / 2, p.y - size / 2, size, size);
+    const dims = getSpawnDimensions();
+    const width = dims.width * view.scale;
+    const height = dims.height * view.scale;
+    ctx.fillRect(p.x - width / 2, p.y - height / 2, width, height);
+    ctx.strokeRect(p.x - width / 2, p.y - height / 2, width, height);
   } else if (type === "bomb") {
     ctx.beginPath();
-    ctx.arc(p.x, p.y, 250 * view.scale, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, getBombRadius(item) * view.scale, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
   } else if (type === "structure") {
@@ -7954,17 +8073,16 @@ function hitTower(world) {
   return null;
 }
 function hitSpawn(world) {
-  const half = (Number(state.spawn_protection_size) || 500) / 2;
+  const dims = getSpawnDimensions();
   for (let i = state.spawn_points.length - 1; i >= 0; i -= 1) {
     const s = state.spawn_points[i];
-    if (Math.abs(world.x - s.x) <= half && Math.abs(world.y - s.y) <= half) return s;
+    if (Math.abs(world.x - s.x) <= dims.width / 2 && Math.abs(world.y - s.y) <= dims.height / 2) return s;
   }
   return null;
 }
 function hitBomb(world) {
-  const threshold = 250;
   for (let i = state.bomb_sites.length - 1; i >= 0; i -= 1) {
-    if (distance(world.x, world.y, state.bomb_sites[i].x, state.bomb_sites[i].y) <= threshold) return state.bomb_sites[i];
+    if (distance(world.x, world.y, state.bomb_sites[i].x, state.bomb_sites[i].y) <= getBombRadius(state.bomb_sites[i])) return state.bomb_sites[i];
   }
   return null;
 }
@@ -8128,8 +8246,10 @@ function cloneState(v) {
 
 function applyStateDelta(currentState, fromState, toState) {
   const next = cloneState(currentState);
-  if (Number(fromState.spawn_protection_size) !== Number(toState.spawn_protection_size)) {
-    next.spawn_protection_size = Number(toState.spawn_protection_size);
+  for (const field of ["spawn_protection_size", "spawn_protection_width", "spawn_protection_height"]) {
+    if (fromState[field] === toState[field]) continue;
+    if (toState[field] === undefined) delete next[field];
+    else next[field] = Number(toState[field]);
   }
 
   MULTIPLAYER_COLLECTIONS.forEach((config) => {
@@ -8248,7 +8368,7 @@ function isPlacementInsideBoundary(type, x, y, item = null, mapState = state) {
     return HOLE_GEOMETRY.findContainingHoleIndex({ x, y }, mapState.map_holes || []) < 0;
   }
   if (type === "bomb") {
-    return HOLE_GEOMETRY.findCircleOverlappingHoleIndex({ x, y }, 250, mapState.map_holes || []) < 0;
+    return HOLE_GEOMETRY.findCircleOverlappingHoleIndex({ x, y }, getBombRadius(item), mapState.map_holes || []) < 0;
   }
   return true;
 }
@@ -8256,8 +8376,11 @@ function isPlacementInsideBoundary(type, x, y, item = null, mapState = state) {
 function isPlacementInsideOuterBoundary(type, x, y, item = null, mapState = state) {
   if (!hasUsableBoundary(mapState)) return false;
   if (type === "tower") return isCircleInsideBoundary(x, y, GAME.TOWER_DIAMETER / 2, mapState);
-  if (type === "bomb") return isCircleInsideBoundary(x, y, 250, mapState);
-  if (type === "spawn") return isSquareInsideBoundary(x, y, (Number(mapState.spawn_protection_size) || 500) / 2, mapState);
+  if (type === "bomb") return isCircleInsideBoundary(x, y, getBombRadius(item), mapState);
+  if (type === "spawn") {
+    const dims = getSpawnDimensions(mapState);
+    return isRectangleInsideBoundary(x, y, dims.width / 2, dims.height / 2, mapState);
+  }
   if (type === "structure") {
     const half = item && Number.isFinite(item.size) ? item.size / 2 : 70;
     return isSquareInsideBoundary(x, y, half, mapState);
@@ -8281,14 +8404,18 @@ function isCircleInsideBoundary(x, y, radius, mapState = state) {
 }
 
 function isSquareInsideBoundary(x, y, half, mapState = state) {
+  return isRectangleInsideBoundary(x, y, half, half, mapState);
+}
+
+function isRectangleInsideBoundary(x, y, halfWidth, halfHeight, mapState = state) {
   const testPoints = [
     { x, y },
-    { x: x - half, y: y - half },
-    { x: x + half, y: y - half },
-    { x: x - half, y: y + half },
-    { x: x + half, y: y + half },
+    { x: x - halfWidth, y: y - halfHeight },
+    { x: x + halfWidth, y: y - halfHeight },
+    { x: x - halfWidth, y: y + halfHeight },
+    { x: x + halfWidth, y: y + halfHeight },
   ];
-  return testPoints.every((p) => isInsideCurrentBoundary(p.x, p.y, mapState));
+  return testPoints.every((point) => isInsideCurrentBoundary(point.x, point.y, mapState));
 }
 
 function pointInPolygon(x, y, points) {
@@ -8663,6 +8790,23 @@ if (globalThis.__COSMOWAR_EDITOR_TEST__) {
     },
     getState: () => cloneState(state),
     exportState: () => buildExportPayload(state),
+    getSpawnDimensions: () => getSpawnDimensions(),
+    getBombRadius: (index) => getBombRadius(state.bomb_sites[index]),
+    setSpawnDimensions(width, height) {
+      const w = expectPositiveSize(width, "spawn_protection_width");
+      const h = expectPositiveSize(height, "spawn_protection_height");
+      return withAction("UPDATE_GLOBAL", () => {
+        state.spawn_protection_width = w;
+        state.spawn_protection_height = h;
+        return true;
+      });
+    },
+    setBombRadius(index, radius) {
+      const site = state.bomb_sites[index];
+      if (!site) return false;
+      const newRadius = expectPositiveSize(radius, "bomb_sites.radius");
+      return withAction("EDIT_BOMB", () => { site.radius = newRadius; return true; });
+    },
     validationMessages: () => getMapValidationReport(state).issues.map((issue) => issue.message),
     isPlacementAllowed: (type, x, y) => isPlacementInsideBoundary(type, x, y),
     placeBoundaryVertex(x, y) {

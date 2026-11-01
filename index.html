@@ -134,7 +134,15 @@
         </div>
         <label class="field">
           <span>spawn_protection_size</span>
-          <input type="number" id="spawnProtectionInput" value="500" step="0.1">
+          <input type="number" id="spawnProtectionInput" value="500" min="0.001" step="10">
+        </label>
+        <label class="field">
+          <span>spawn_protection_width (X)</span>
+          <input type="number" id="spawnProtectionWidthInput" min="0.001" value="500" step="10">
+        </label>
+        <label class="field">
+          <span>spawn_protection_height (Y)</span>
+          <input type="number" id="spawnProtectionHeightInput" min="0.001" value="500" step="10">
         </label>
 
         <label class="field">
