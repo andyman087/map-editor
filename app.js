@@ -19,6 +19,25 @@ const GAME = {
   MAX_ZOOM: 4,
 };
 
+// Optional map dimensions. Existing maps still use spawn_protection_size on both axes.
+function getSpawnDimensions(mapState = state) {
+  const legacy = Number(mapState.spawn_protection_size) > 0 ? Number(mapState.spawn_protection_size) : 500;
+  return {
+    width: mapState.spawn_protection_width === undefined ? legacy : Number(mapState.spawn_protection_width),
+    height: mapState.spawn_protection_height === undefined ? legacy : Number(mapState.spawn_protection_height),
+  };
+}
+
+function getBombRadius(site) {
+  return site?.radius === undefined ? GAME.BOMB_DIAMETER / 2 : Number(site.radius);
+}
+
+function expectPositiveSize(value, label) {
+  const number = expectNumber(value, label);
+  if (number <= 0) throw new Error(`${label} must be greater than zero.`);
+  return number;
+}
+
 const COLORS = {
   bg: "#0D0F17",
   terrain: "#0D0F17",
@@ -90,6 +109,8 @@ const el = {
   settingsCloseBtn: document.getElementById("settingsCloseBtn"),
   settingsPanel: document.getElementById("settingsPanel"),
   spawnProtectionInput: document.getElementById("spawnProtectionInput"),
+  spawnProtectionWidthInput: document.getElementById("spawnProtectionWidthInput"),
+  spawnProtectionHeightInput: document.getElementById("spawnProtectionHeightInput"),
   snapStrengthInput: document.getElementById("snapStrengthInput"),
   objectSnapEnabledInput: document.getElementById("objectSnapEnabledInput"),
   buildSnapEnabledInput: document.getElementById("buildSnapEnabledInput"),
@@ -1230,8 +1251,10 @@ class ActionValidator {
     const candidate = cloneState(currentState);
     const before = payload.before;
     const after = payload.after;
-    if (Number(before.spawn_protection_size) !== Number(after.spawn_protection_size)) {
-      candidate.spawn_protection_size = Number(after.spawn_protection_size);
+    for (const field of ["spawn_protection_size", "spawn_protection_width", "spawn_protection_height"]) {
+      if (before[field] === after[field]) continue;
+      if (after[field] === undefined) delete candidate[field];
+      else candidate[field] = Number(after[field]);
     }
 
     this.applyDeletes(candidate, before, after);
@@ -1313,7 +1336,10 @@ class ActionValidator {
     createByType("bomb").forEach((item) => {
       const uid = createUid("bomb");
       permanentIds.uids[item.uid] = uid;
-      candidate.bomb_sites.push({ uid, site_letter: String(item.site_letter || "A").toUpperCase(), x: Number(item.x), y: Number(item.y) });
+      candidate.bomb_sites.push({
+        uid, site_letter: String(item.site_letter || "A").toUpperCase(), x: Number(item.x), y: Number(item.y),
+        ...(item.radius === undefined ? {} : { radius: Number(item.radius) }),
+      });
     });
     createByType("tower").forEach((item) => {
       const uid = createUid("tower");
@@ -1377,7 +1403,12 @@ class ActionValidator {
       return { ...current, t1: Number(item.t1), t2: Number(item.t2), team_id: Number(item.team_id) };
     }
     if (type === "spawn") return { ...current, team_id: Number(item.team_id), x: Number(item.x), y: Number(item.y) };
-    if (type === "bomb") return { ...current, site_letter: String(item.site_letter || "A").toUpperCase(), x: Number(item.x), y: Number(item.y) };
+    if (type === "bomb") {
+      const updated = { ...current, site_letter: String(item.site_letter || "A").toUpperCase(), x: Number(item.x), y: Number(item.y) };
+      if (item.radius === undefined) delete updated.radius;
+      else updated.radius = Number(item.radius);
+      return updated;
+    }
     if (type === "boundary") return { ...current, x: Number(item.x), y: Number(item.y) };
     if (type === "hole") {
       return {
@@ -1405,6 +1436,12 @@ class ActionValidator {
 
   validateCandidate(candidate, previousState = null) {
     if (!this.isStateLike(candidate)) return "Candidate state is malformed.";
+    for (const field of ["spawn_protection_size", "spawn_protection_width", "spawn_protection_height"]) {
+      if (candidate[field] !== undefined && (!Number.isFinite(candidate[field]) || candidate[field] <= 0)) return `${field} must be a positive number.`;
+    }
+    for (const bomb of candidate.bomb_sites) {
+      if (bomb.radius !== undefined && (!Number.isFinite(bomb.radius) || bomb.radius <= 0)) return "Bomb radius must be a positive number.";
+    }
     const spawnTeams = new Map();
     for (const spawn of candidate.spawn_points) {
       if (spawn.team_id !== 0 && spawn.team_id !== 1) return "Spawn team must be Team Blue or Team Red.";
@@ -1522,6 +1559,7 @@ function setup() {
   hydrateCountersFromState();
   restoreCustomShapes();
   bindUI();
+  syncSpawnProtectionInputs();
   setupPanelResizers();
   setupMultiplayer();
   updateTeamSwatches();
@@ -1753,6 +1791,8 @@ function getPanelWidth(side) {
 function bindUI() {
   el.toolButtons.forEach((button) => button.addEventListener("click", () => setMode(button.dataset.tool)));
   el.spawnProtectionInput.addEventListener("change", onGlobalSpawnProtectionChange);
+  el.spawnProtectionWidthInput?.addEventListener("change", () => onSpawnAxisChange("width"));
+  el.spawnProtectionHeightInput?.addEventListener("change", () => onSpawnAxisChange("height"));
 
   el.teamSwatches.forEach((swatch) => {
     swatch.addEventListener("click", () => {
@@ -1952,10 +1992,18 @@ function onDocumentMouseDown(event) {
   setSettingsOpen(false);
 }
 
+function syncSpawnProtectionInputs() {
+  const dimensions = getSpawnDimensions(state);
+  el.spawnProtectionInput.value = String(state.spawn_protection_size);
+  if (el.spawnProtectionWidthInput) el.spawnProtectionWidthInput.value = String(dimensions.width);
+  if (el.spawnProtectionHeightInput) el.spawnProtectionHeightInput.value = String(dimensions.height);
+}
+
 function onGlobalSpawnProtectionChange() {
   const value = Number(el.spawnProtectionInput.value);
-  if (!Number.isFinite(value)) {
-    el.spawnProtectionInput.value = String(state.spawn_protection_size);
+  if (!Number.isFinite(value) || value <= 0) {
+    syncSpawnProtectionInputs();
+    setActionState("Spawn protection size must be positive", "warn", true);
     return;
   }
   withAction("UPDATE_GLOBAL", () => {
@@ -1963,6 +2011,23 @@ function onGlobalSpawnProtectionChange() {
     return true;
   });
   setActionState(`spawn_protection_size = ${value}`, "success", true);
+}
+
+function onSpawnAxisChange(axis, sourceInput = null) {
+  const input = sourceInput || (axis === "width" ? el.spawnProtectionWidthInput : el.spawnProtectionHeightInput);
+  if (!input) return;
+  const value = Number(input.value);
+  if (!Number.isFinite(value) || value <= 0) {
+    syncSpawnProtectionInputs();
+    renderSelectionPanel();
+    setActionState(`Spawn ${axis} must be positive`, "warn", true);
+    return;
+  }
+  withAction("UPDATE_GLOBAL", () => {
+    state[`spawn_protection_${axis}`] = roundTo(value, 3);
+    return true;
+  });
+  setActionState(`Spawn ${axis}: ${value} units`, "success", true);
 }
 
 function resizeCanvas() {
@@ -3123,7 +3188,7 @@ function getPlacementRestriction(type, x, y, item = null, mapState = state) {
     if (holeIndex >= 0) return `inside or on hole ${holeIndex}`;
   }
   if (type === "bomb") {
-    const holeIndex = HOLE_GEOMETRY.findCircleOverlappingHoleIndex({ x, y }, 250, mapState.map_holes);
+    const holeIndex = HOLE_GEOMETRY.findCircleOverlappingHoleIndex({ x, y }, getBombRadius(item), mapState.map_holes);
     if (holeIndex >= 0) return `overlapping hole ${holeIndex}`;
   }
   return "";
@@ -3773,6 +3838,7 @@ function normalizeCustomShapeClipboard(value) {
   const bombs = sortObjects(list("bombs").map((bomb, index) => ({
     ...offset(bomb, `bombs[${index}]`),
     site_letter: String(bomb?.site_letter || "A").slice(0, 4).toUpperCase(),
+    ...(bomb?.radius === undefined ? {} : { radius: expectPositiveSize(bomb.radius, `bombs[${index}].radius`) }),
   })));
   const structures = sortObjects(list("structures").map((structure, index) => ({
     ...offset(structure, `structures[${index}]`),
@@ -4204,7 +4270,10 @@ function commitPasteDraft() {
     });
 
     entities.bombs.forEach((bomb) => {
-      const pasted = { uid: createUid("bomb"), site_letter: String(bomb.site_letter || nextBombSiteLetter()).toUpperCase(), x: bomb.x, y: bomb.y };
+      const pasted = {
+        uid: createUid("bomb"), site_letter: String(bomb.site_letter || nextBombSiteLetter()).toUpperCase(), x: bomb.x, y: bomb.y,
+        ...(bomb.radius === undefined ? {} : { radius: bomb.radius }),
+      };
       state.bomb_sites.push(pasted);
       pastedKeys.push(makeKey("bomb", pasted.uid));
     });
@@ -4519,6 +4588,7 @@ function renderSpawnSelection(entry) {
     ${selectionTypeRow("Spawn")}
     ${inspectorSection("Position", inspectorPositionFields("selSpawnX", "selSpawnY", spawn.x, spawn.y))}
     ${inspectorSection("Appearance", teamSwatchMarkup(spawn.team_id, false))}
+    ${inspectorSection("Spawn area (both teams)", `${inspectorField("Width (X)", `<input id="selSpawnWidth" type="number" min="0.001" step="10" value="${getSpawnDimensions().width}">`)}${inspectorField("Height (Y)", `<input id="selSpawnHeight" type="number" min="0.001" step="10" value="${getSpawnDimensions().height}">`)}`)}
     ${inspectorSection("Properties", inspectorField("Snapping", snapToggleMarkup()))}
     ${inspectorSection("Danger zone", '<button id="deleteSpawnBtn" class="btn danger wide">Delete spawn</button>', "destructive")}
   `;
@@ -4533,6 +4603,8 @@ function renderSpawnSelection(entry) {
   });
   bindNumericChange("selSpawnX", (v) => withAction("MOVE_SPAWN", () => { spawn.x = roundTo(v, 3); return true; }));
   bindNumericChange("selSpawnY", (v) => withAction("MOVE_SPAWN", () => { spawn.y = roundTo(v, 3); return true; }));
+  document.getElementById("selSpawnWidth")?.addEventListener("change", (event) => onSpawnAxisChange("width", event.target));
+  document.getElementById("selSpawnHeight")?.addEventListener("change", (event) => onSpawnAxisChange("height", event.target));
   bindSnapToggle();
   document.getElementById("deleteSpawnBtn").addEventListener("click", deleteSelected);
 }
@@ -4542,11 +4614,20 @@ function renderBombSelection(entry) {
   el.selectionPanel.innerHTML = `
     ${selectionTypeRow("Bomb Site")}
     ${inspectorSection("Position", inspectorPositionFields("selBombX", "selBombY", bomb.x, bomb.y))}
-    ${inspectorSection("Properties", `${inspectorField("Site", `<span class="letter-chip">${bomb.site_letter}</span>`)}${inspectorField("Snapping", snapToggleMarkup())}`)}
+    ${inspectorSection("Properties", `${inspectorField("Site", `<span class="letter-chip">${bomb.site_letter}</span>`)}${inspectorField("Radius", `<input id="selBombRadius" type="number" min="0.001" step="10" value="${getBombRadius(bomb)}">`)}${inspectorField("Snapping", snapToggleMarkup())}`)}
     ${inspectorSection("Danger zone", '<button id="deleteBombBtn" class="btn danger wide">Delete bomb site</button>', "destructive")}
   `;
   bindNumericChange("selBombX", (v) => withAction("MOVE_BOMB", () => { bomb.x = roundTo(v, 3); return true; }));
   bindNumericChange("selBombY", (v) => withAction("MOVE_BOMB", () => { bomb.y = roundTo(v, 3); return true; }));
+  document.getElementById("selBombRadius")?.addEventListener("change", (event) => {
+    const radius = Number(event.target.value);
+    if (!Number.isFinite(radius) || radius <= 0) {
+      renderSelectionPanel();
+      setActionState("Bombsite radius must be positive", "warn", true);
+      return;
+    }
+    withAction("EDIT_BOMB", () => { bomb.radius = roundTo(radius, 3); return true; });
+  });
   bindSnapToggle();
   document.getElementById("deleteBombBtn").addEventListener("click", deleteSelected);
 }
@@ -4805,7 +4886,7 @@ function onStateChanged() {
   hydrateCountersFromState();
   sanitizeSelection();
   renderSelectionPanel();
-  el.spawnProtectionInput.value = String(state.spawn_protection_size);
+  syncSpawnProtectionInputs();
   updateInvalidObjectWarning();
   saveSession();
   requestRender();
@@ -4833,7 +4914,7 @@ function onStateReplaced() {
   hydrateCountersFromState();
   sanitizeSelection();
   renderSelectionPanel();
-  el.spawnProtectionInput.value = String(state.spawn_protection_size);
+  syncSpawnProtectionInputs();
   updateInvalidObjectWarning();
   saveSession();
   requestRender();
@@ -5003,6 +5084,16 @@ function getMapValidationReport(mapState = state) {
     issues.push({ message, keys: keys.filter(Boolean) });
   };
   const keyFor = (type, item) => item?.uid ? makeKey(type, item.uid) : null;
+  for (const field of ["spawn_protection_size", "spawn_protection_width", "spawn_protection_height"]) {
+    if (mapState[field] !== undefined && (!Number.isFinite(mapState[field]) || mapState[field] <= 0)) {
+      addIssue(`${field} must be a positive number.`, mapState.spawn_points.map((item) => keyFor("spawn", item)));
+    }
+  }
+  mapState.bomb_sites.forEach((bomb) => {
+    if (bomb.radius !== undefined && (!Number.isFinite(bomb.radius) || bomb.radius <= 0)) {
+      addIssue(`Bomb site ${bomb.site_letter} radius must be positive.`, [keyFor("bomb", bomb)]);
+    }
+  });
 
   if (mapState.map_boundaries.length < 3) {
     addIssue(
@@ -6393,7 +6484,7 @@ function applyConversionPreviewState(nextState) {
   interaction.resize = null;
   hydrateCountersFromState();
   renderSelectionPanel();
-  el.spawnProtectionInput.value = String(state.spawn_protection_size);
+  syncSpawnProtectionInputs();
   updateInvalidObjectWarning();
   fitBoundaryInView();
   requestRender();
