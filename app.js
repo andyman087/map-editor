@@ -6157,7 +6157,7 @@ function getCleanRenderBounds(scene) {
     scene.holes.forEach((hole) => hole.points.forEach((point) => include(point.x, point.y)));
     scene.towers.forEach((tower) => include(tower.x, tower.y, GAME.TOWER_DIAMETER / 2));
     scene.spawns.forEach((spawn) => include(spawn.x, spawn.y, scene.spawnProtectionWidth / 2, scene.spawnProtectionHeight / 2));
-    scene.bombs.forEach((bomb) => include(bomb.x, bomb.y, getBombRadius(bomb));
+    scene.bombs.forEach((bomb) => include(bomb.x, bomb.y, getBombRadius(bomb)));
     scene.structures.forEach((structure) => include(structure.x, structure.y, Math.max(1, Number(structure.size) || 1) / 2));
   }
 
