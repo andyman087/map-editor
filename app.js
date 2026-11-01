@@ -6395,7 +6395,10 @@ function buildExportPayload(exportState) {
     spawn_protection_size: Number(exportState.spawn_protection_size),
     map_boundaries: exportState.map_boundaries.map((point) => ({ x: roundTo(point.x, 3), y: roundTo(point.y, 3) })),
     spawn_points: exportState.spawn_points.map((spawn) => ({ team_id: spawn.team_id, x: roundTo(spawn.x, 3), y: roundTo(spawn.y, 3) })).sort((a, b) => a.team_id - b.team_id),
-    bomb_sites: exportState.bomb_sites.map((bomb) => ({ site_letter: String(bomb.site_letter || "A").toUpperCase(), x: roundTo(bomb.x, 3), y: roundTo(bomb.y, 3) })),
+    bomb_sites: exportState.bomb_sites.map((bomb) => ({
+      site_letter: String(bomb.site_letter || "A").toUpperCase(), x: roundTo(bomb.x, 3), y: roundTo(bomb.y, 3),
+      ...(bomb.radius === undefined ? {} : { radius: roundTo(bomb.radius, 3) }),
+    })),
     towers: [...exportState.towers].sort((a, b) => a.id - b.id).map((tower) => ({
       id: tower.id,
       team_id: tower.team_id,
@@ -6406,6 +6409,10 @@ function buildExportPayload(exportState) {
     })),
     walls: exportState.walls.map((wall) => ({ t1: wall.t1, t2: wall.t2, team_id: wall.team_id })),
   };
+  for (const axis of ["width", "height"]) {
+    const key = `spawn_protection_${axis}`;
+    if (exportState[key] !== undefined) payload[key] = roundTo(exportState[key], 3);
+  }
   HOLE_GEOMETRY.addMapHolesToPayload(payload, exportState.map_holes, (value) => roundTo(value, 3));
   if (exportState.structures.length) {
     payload.structures = exportState.structures.map((structure) => ({
@@ -6642,11 +6649,15 @@ function parseImportedState(data) {
   const wallsRaw = expectArray(data.walls, "walls");
   const structRaw = Array.isArray(data.structures) ? data.structures : [];
   const imported = {
-    spawn_protection_size: expectNumber(data.spawn_protection_size, "spawn_protection_size"),
+    spawn_protection_size: expectPositiveSize(data.spawn_protection_size, "spawn_protection_size"),
     map_boundaries: mapRaw.map((p, i) => ({ uid: createUid("boundary"), x: expectNumber(p?.x, `map_boundaries[${i}].x`), y: expectNumber(p?.y, `map_boundaries[${i}].y`) })),
     map_holes: holes,
     spawn_points: spawnRaw.map((s, i) => ({ uid: createUid("spawn"), team_id: expectInteger(s?.team_id, `spawn_points[${i}].team_id`), x: expectNumber(s?.x, `spawn_points[${i}].x`), y: expectNumber(s?.y, `spawn_points[${i}].y`) })),
-    bomb_sites: bombRaw.map((b, i) => ({ uid: createUid("bomb"), site_letter: expectString(b?.site_letter, `bomb_sites[${i}].site_letter`).toUpperCase(), x: expectNumber(b?.x, `bomb_sites[${i}].x`), y: expectNumber(b?.y, `bomb_sites[${i}].y`) })),
+    bomb_sites: bombRaw.map((b, i) => ({
+      uid: createUid("bomb"), site_letter: expectString(b?.site_letter, `bomb_sites[${i}].site_letter`).toUpperCase(),
+      x: expectNumber(b?.x, `bomb_sites[${i}].x`), y: expectNumber(b?.y, `bomb_sites[${i}].y`),
+      ...(b?.radius === undefined ? {} : { radius: expectPositiveSize(b.radius, `bomb_sites[${i}].radius`) }),
+    })),
     towers: towersRaw.map((t, i) => ({
       uid: createUid("tower"),
       id: expectInteger(t?.id, `towers[${i}].id`),
@@ -6669,6 +6680,10 @@ function parseImportedState(data) {
     })),
   };
 
+  for (const axis of ["width", "height"]) {
+    const key = `spawn_protection_${axis}`;
+    if (data[key] !== undefined) imported[key] = expectPositiveSize(data[key], key);
+  }
   const spawnCounts = new Map();
   imported.spawn_points.forEach((s) => {
     if (s.team_id !== 0 && s.team_id !== 1) throw new Error(`spawn_points includes invalid team_id ${s.team_id}`);
@@ -8775,6 +8790,23 @@ if (globalThis.__COSMOWAR_EDITOR_TEST__) {
     },
     getState: () => cloneState(state),
     exportState: () => buildExportPayload(state),
+    getSpawnDimensions: () => getSpawnDimensions(),
+    getBombRadius: (index) => getBombRadius(state.bomb_sites[index]),
+    setSpawnDimensions(width, height) {
+      const w = expectPositiveSize(width, "spawn_protection_width");
+      const h = expectPositiveSize(height, "spawn_protection_height");
+      return withAction("UPDATE_GLOBAL", () => {
+        state.spawn_protection_width = w;
+        state.spawn_protection_height = h;
+        return true;
+      });
+    },
+    setBombRadius(index, radius) {
+      const site = state.bomb_sites[index];
+      if (!site) return false;
+      const newRadius = expectPositiveSize(radius, "bomb_sites.radius");
+      return withAction("EDIT_BOMB", () => { site.radius = newRadius; return true; });
+    },
     validationMessages: () => getMapValidationReport(state).issues.map((issue) => issue.message),
     isPlacementAllowed: (type, x, y) => isPlacementInsideBoundary(type, x, y),
     placeBoundaryVertex(x, y) {
