@@ -5519,18 +5519,20 @@ function drawSpawns() {
   state.spawn_points.forEach((spawn) => {
     if (isSuppressedLiveMirrorItem("spawn", spawn.uid)) return;
     const p = worldToScreen(spawn.x, spawn.y);
-    const spawnSize = Math.max(1, Number(state.spawn_protection_size) || 500);
-    const size = spawnSize * view.scale;
-    const half = size / 2;
+    const dims = getSpawnDimensions();
+    const width = dims.width * view.scale;
+    const height = dims.height * view.scale;
+    const halfWidth = width / 2;
+    const halfHeight = height / 2;
     const invalid = isObjectInvalid("spawn", spawn) || isActiveRotationInvalidKey(makeKey("spawn", spawn.uid));
     const color = invalid ? COLORS.danger : getTeamColor(spawn.team_id);
     ctx.lineWidth = 4 * view.scale;
     ctx.strokeStyle = color;
     ctx.fillStyle = color;
     ctx.globalAlpha = invalid ? 0.38 : 0.25;
-    ctx.fillRect(p.x - half, p.y - half, size, size);
+    ctx.fillRect(p.x - halfWidth, p.y - halfHeight, width, height);
     ctx.globalAlpha = 1.0;
-    ctx.strokeRect(p.x - half, p.y - half, size, size);
+    ctx.strokeRect(p.x - halfWidth, p.y - halfHeight, width, height);
 
     ctx.fillStyle = color;
     const iconSize = 20 * view.scale;
@@ -5541,7 +5543,7 @@ function drawSpawns() {
       const pad = 8 * view.scale;
       ctx.lineWidth = 3 * view.scale;
       ctx.strokeStyle = "#FFFFFF";
-      ctx.strokeRect(p.x - half - pad, p.y - half - pad, size + pad * 2, size + pad * 2);
+      ctx.strokeRect(p.x - halfWidth - pad, p.y - halfHeight - pad, width + pad * 2, height + pad * 2);
     }
   });
 }
@@ -5550,7 +5552,7 @@ function drawBombSites() {
   state.bomb_sites.forEach((bomb) => {
     if (isSuppressedLiveMirrorItem("bomb", bomb.uid)) return;
     const p = worldToScreen(bomb.x, bomb.y);
-    const radius = 250 * view.scale;
+    const radius = getBombRadius(bomb) * view.scale;
     const invalid = isObjectInvalid("bomb", bomb) || isActiveRotationInvalidKey(makeKey("bomb", bomb.uid));
     ctx.beginPath();
     ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
@@ -5774,23 +5776,25 @@ function drawPasteDraft() {
 
   entities.spawns.forEach((spawn) => {
     const p = worldToScreen(spawn.x, spawn.y);
-    const spawnSize = Math.max(1, Number(state.spawn_protection_size) || 500);
-    const size = spawnSize * view.scale;
-    const half = size / 2;
+    const dims = getSpawnDimensions();
+    const width = dims.width * view.scale;
+    const height = dims.height * view.scale;
+    const halfWidth = width / 2;
+    const halfHeight = height / 2;
     const color = invalid ? COLORS.danger : getTeamColor(spawn.team_id);
     ctx.fillStyle = color;
     ctx.strokeStyle = color;
     ctx.globalAlpha = invalid ? 0.35 : 0.22;
-    ctx.fillRect(p.x - half, p.y - half, size, size);
+    ctx.fillRect(p.x - halfWidth, p.y - halfHeight, width, height);
     ctx.globalAlpha = 0.9;
     ctx.lineWidth = 4 * view.scale;
-    ctx.strokeRect(p.x - half, p.y - half, size, size);
+    ctx.strokeRect(p.x - halfWidth, p.y - halfHeight, width, height);
     ctx.globalAlpha = 1.0;
   });
 
   entities.bombs.forEach((bomb) => {
     const p = worldToScreen(bomb.x, bomb.y);
-    const radius = 250 * view.scale;
+    const radius = getBombRadius(bomb) * view.scale;
     ctx.beginPath();
     ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
     ctx.lineWidth = 8 * view.scale;
@@ -5834,18 +5838,20 @@ function drawPasteDraft() {
 
 function drawSpawnGhost(ghost) {
   const p = worldToScreen(ghost.x, ghost.y);
-  const spawnSize = Math.max(1, Number(state.spawn_protection_size) || 500);
-  const size = spawnSize * view.scale;
-  const half = size / 2;
+  const dims = getSpawnDimensions();
+  const width = dims.width * view.scale;
+  const height = dims.height * view.scale;
+  const halfWidth = width / 2;
+  const halfHeight = height / 2;
   const color = ghost.invalid ? COLORS.danger : getTeamColor(defaults.defaultTeam);
 
   ctx.lineWidth = 4 * view.scale;
   ctx.strokeStyle = color;
   ctx.fillStyle = color;
   ctx.globalAlpha = ghost.invalid ? 0.35 : 0.22;
-  ctx.fillRect(p.x - half, p.y - half, size, size);
+  ctx.fillRect(p.x - halfWidth, p.y - halfHeight, width, height);
   ctx.globalAlpha = 0.9;
-  ctx.strokeRect(p.x - half, p.y - half, size, size);
+  ctx.strokeRect(p.x - halfWidth, p.y - halfHeight, width, height);
 
   const iconSize = 20 * view.scale;
   const iconHalf = iconSize / 2;
@@ -5856,7 +5862,7 @@ function drawSpawnGhost(ghost) {
 
 function drawBombGhost(ghost) {
   const p = worldToScreen(ghost.x, ghost.y);
-  const radius = 250 * view.scale;
+  const radius = getBombRadius(ghost) * view.scale;
   const stroke = ghost.invalid ? withAlpha(COLORS.danger, 0.85) : "rgba(51, 127, 229, 0.8)";
   const fill = ghost.invalid ? withAlpha(COLORS.danger, 0.2) : "rgba(51, 127, 229, 0.15)";
 
@@ -6110,6 +6116,8 @@ function createCleanRenderScene(mapState = state) {
     walls: (mapState.walls || []).map((item) => ({ ...item })),
     structures: (mapState.structures || []).map((item) => ({ ...item, x: Number(item.x), y: Number(item.y) })),
     spawnProtectionSize: Math.max(1, Number(mapState.spawn_protection_size) || 500),
+    spawnProtectionWidth: getSpawnDimensions(mapState).width,
+    spawnProtectionHeight: getSpawnDimensions(mapState).height,
   };
 }
 
@@ -6124,6 +6132,8 @@ function createClipboardRenderScene(clipboard) {
     walls: (clipboard?.walls || []).map((item) => ({ ...item })),
     structures: (clipboard?.structures || []).map(point),
     spawnProtectionSize: Math.max(1, Number(state.spawn_protection_size) || 500),
+    spawnProtectionWidth: getSpawnDimensions().width,
+    spawnProtectionHeight: getSpawnDimensions().height,
   };
 }
 
@@ -6146,8 +6156,8 @@ function getCleanRenderBounds(scene) {
     scene.boundary.forEach((point) => include(point.x, point.y));
     scene.holes.forEach((hole) => hole.points.forEach((point) => include(point.x, point.y)));
     scene.towers.forEach((tower) => include(tower.x, tower.y, GAME.TOWER_DIAMETER / 2));
-    scene.spawns.forEach((spawn) => include(spawn.x, spawn.y, scene.spawnProtectionSize / 2));
-    scene.bombs.forEach((bomb) => include(bomb.x, bomb.y, GAME.BOMB_DIAMETER / 2));
+    scene.spawns.forEach((spawn) => include(spawn.x, spawn.y, scene.spawnProtectionWidth / 2, scene.spawnProtectionHeight / 2));
+    scene.bombs.forEach((bomb) => include(bomb.x, bomb.y, getBombRadius(bomb));
     scene.structures.forEach((structure) => include(structure.x, structure.y, Math.max(1, Number(structure.size) || 1) / 2));
   }
 
