@@ -321,7 +321,8 @@
       if (holeIndex >= 0) addIssue(`Tower 'tower_${tower.id}' is inside hole ${holeIndex}.`, [holeIndex], { type: "tower", index });
     });
     (mapState?.bomb_sites || []).forEach((bomb, index) => {
-      const holeIndex = findCircleOverlappingHoleIndex(bomb, 250, holes);
+      const radius = bomb.radius === undefined ? 250 : Number(bomb.radius);
+      const holeIndex = findCircleOverlappingHoleIndex(bomb, radius, holes);
       if (holeIndex >= 0) addIssue(`Bomb site '${String(bomb.site_letter || "A").toUpperCase()}' overlaps hole ${holeIndex}.`, [holeIndex], { type: "bomb", index });
     });
 
