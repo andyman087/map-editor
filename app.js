@@ -6221,18 +6221,19 @@ function renderCleanSceneToCanvas(targetCanvas, scene, options = {}) {
 
   scene.spawns.forEach((spawn) => {
     const p = screen(spawn);
-    const size = scene.spawnProtectionSize * scale;
+    const width = scene.spawnProtectionWidth * scale;
+    const height = scene.spawnProtectionHeight * scale;
     const color = teamColor(spawn.team_id);
     target.fillStyle = withAlpha(color, 0.12);
     target.strokeStyle = withAlpha(color, 0.72);
     target.lineWidth = Math.max(1, Math.min(3, 3 * scale));
-    target.fillRect(p.x - size / 2, p.y - size / 2, size, size);
-    target.strokeRect(p.x - size / 2, p.y - size / 2, size, size);
+    target.fillRect(p.x - width / 2, p.y - height / 2, width, height);
+    target.strokeRect(p.x - width / 2, p.y - height / 2, width, height);
   });
 
   scene.bombs.forEach((bomb) => {
     const p = screen(bomb);
-    const radius = (GAME.BOMB_DIAMETER / 2) * scale;
+    const radius = getBombRadius(bomb) * scale;
     target.beginPath();
     target.arc(p.x, p.y, radius, 0, Math.PI * 2);
     target.fillStyle = "rgba(51, 127, 229, 0.13)";
@@ -7044,12 +7045,14 @@ function drawMirrorPreviewEntity(type, item, point) {
     ctx.fill();
     ctx.stroke();
   } else if (type === "spawn") {
-    const size = (Number(state.spawn_protection_size) || 500) * view.scale;
-    ctx.fillRect(p.x - size / 2, p.y - size / 2, size, size);
-    ctx.strokeRect(p.x - size / 2, p.y - size / 2, size, size);
+    const dims = getSpawnDimensions();
+    const width = dims.width * view.scale;
+    const height = dims.height * view.scale;
+    ctx.fillRect(p.x - width / 2, p.y - height / 2, width, height);
+    ctx.strokeRect(p.x - width / 2, p.y - height / 2, width, height);
   } else if (type === "bomb") {
     ctx.beginPath();
-    ctx.arc(p.x, p.y, 250 * view.scale, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, getBombRadius(item) * view.scale, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
   } else if (type === "structure") {
@@ -8055,17 +8058,16 @@ function hitTower(world) {
   return null;
 }
 function hitSpawn(world) {
-  const half = (Number(state.spawn_protection_size) || 500) / 2;
+  const dims = getSpawnDimensions();
   for (let i = state.spawn_points.length - 1; i >= 0; i -= 1) {
     const s = state.spawn_points[i];
-    if (Math.abs(world.x - s.x) <= half && Math.abs(world.y - s.y) <= half) return s;
+    if (Math.abs(world.x - s.x) <= dims.width / 2 && Math.abs(world.y - s.y) <= dims.height / 2) return s;
   }
   return null;
 }
 function hitBomb(world) {
-  const threshold = 250;
   for (let i = state.bomb_sites.length - 1; i >= 0; i -= 1) {
-    if (distance(world.x, world.y, state.bomb_sites[i].x, state.bomb_sites[i].y) <= threshold) return state.bomb_sites[i];
+    if (distance(world.x, world.y, state.bomb_sites[i].x, state.bomb_sites[i].y) <= getBombRadius(state.bomb_sites[i])) return state.bomb_sites[i];
   }
   return null;
 }
@@ -8229,8 +8231,10 @@ function cloneState(v) {
 
 function applyStateDelta(currentState, fromState, toState) {
   const next = cloneState(currentState);
-  if (Number(fromState.spawn_protection_size) !== Number(toState.spawn_protection_size)) {
-    next.spawn_protection_size = Number(toState.spawn_protection_size);
+  for (const field of ["spawn_protection_size", "spawn_protection_width", "spawn_protection_height"]) {
+    if (fromState[field] === toState[field]) continue;
+    if (toState[field] === undefined) delete next[field];
+    else next[field] = Number(toState[field]);
   }
 
   MULTIPLAYER_COLLECTIONS.forEach((config) => {
@@ -8349,7 +8353,7 @@ function isPlacementInsideBoundary(type, x, y, item = null, mapState = state) {
     return HOLE_GEOMETRY.findContainingHoleIndex({ x, y }, mapState.map_holes || []) < 0;
   }
   if (type === "bomb") {
-    return HOLE_GEOMETRY.findCircleOverlappingHoleIndex({ x, y }, 250, mapState.map_holes || []) < 0;
+    return HOLE_GEOMETRY.findCircleOverlappingHoleIndex({ x, y }, getBombRadius(item), mapState.map_holes || []) < 0;
   }
   return true;
 }
@@ -8357,8 +8361,11 @@ function isPlacementInsideBoundary(type, x, y, item = null, mapState = state) {
 function isPlacementInsideOuterBoundary(type, x, y, item = null, mapState = state) {
   if (!hasUsableBoundary(mapState)) return false;
   if (type === "tower") return isCircleInsideBoundary(x, y, GAME.TOWER_DIAMETER / 2, mapState);
-  if (type === "bomb") return isCircleInsideBoundary(x, y, 250, mapState);
-  if (type === "spawn") return isSquareInsideBoundary(x, y, (Number(mapState.spawn_protection_size) || 500) / 2, mapState);
+  if (type === "bomb") return isCircleInsideBoundary(x, y, getBombRadius(item), mapState);
+  if (type === "spawn") {
+    const dims = getSpawnDimensions(mapState);
+    return isRectangleInsideBoundary(x, y, dims.width / 2, dims.height / 2, mapState);
+  }
   if (type === "structure") {
     const half = item && Number.isFinite(item.size) ? item.size / 2 : 70;
     return isSquareInsideBoundary(x, y, half, mapState);
@@ -8382,14 +8389,18 @@ function isCircleInsideBoundary(x, y, radius, mapState = state) {
 }
 
 function isSquareInsideBoundary(x, y, half, mapState = state) {
+  return isRectangleInsideBoundary(x, y, half, half, mapState);
+}
+
+function isRectangleInsideBoundary(x, y, halfWidth, halfHeight, mapState = state) {
   const testPoints = [
     { x, y },
-    { x: x - half, y: y - half },
-    { x: x + half, y: y - half },
-    { x: x - half, y: y + half },
-    { x: x + half, y: y + half },
+    { x: x - halfWidth, y: y - halfHeight },
+    { x: x + halfWidth, y: y - halfHeight },
+    { x: x - halfWidth, y: y + halfHeight },
+    { x: x + halfWidth, y: y + halfHeight },
   ];
-  return testPoints.every((p) => isInsideCurrentBoundary(p.x, p.y, mapState));
+  return testPoints.every((point) => isInsideCurrentBoundary(point.x, point.y, mapState));
 }
 
 function pointInPolygon(x, y, points) {
