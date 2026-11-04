@@ -1559,6 +1559,7 @@ function setup() {
   hydrateCountersFromState();
   restoreCustomShapes();
   bindUI();
+  window.addEventListener("cosmowar:tower-art-ready", requestRender);
   syncSpawnProtectionInputs();
   setupPanelResizers();
   setupMultiplayer();
@@ -4962,7 +4963,7 @@ function restoreSavedSession() {
       editorSettings.originAxesVisible = saved.editorSettings.originAxesVisible;
     }
     if (saved?.editorSettings?.uiShell === "new" || saved?.editorSettings?.uiShell === "current") {
-      editorSettings.uiShell = saved.editorSettings.uiShell;
+      editorSettings.uiShell = "new";
     }
     if (saved?.editorSettings?.theme === "dark" || saved?.editorSettings?.theme === "light") {
       editorSettings.theme = saved.editorSettings.theme;
@@ -5578,6 +5579,13 @@ function drawBombSites() {
   });
 }
 
+// Use the game tower sprite sheet at exactly the editor's original 70.4-unit
+// diameter. Placement, collision, selection and map JSON sizing stay unchanged.
+function drawGameTower(target, tower, point, scale, alpha = 1) {
+  const art = globalThis.CosmowarTowerArt;
+  return Boolean(art && art.draw(target, tower, point.x, point.y, GAME.TOWER_DIAMETER * scale, alpha));
+}
+
 function drawTowers() {
   state.towers.forEach((tower) => {
     if (isSuppressedLiveMirrorItem("tower", tower.uid)) return;
@@ -5586,13 +5594,16 @@ function drawTowers() {
     const color = getTeamColor(tower.team_id);
     const borderColor = tower.is_invincible ? "#FFD166" : color;
 
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, (GAME.TOWER_DIAMETER / 2) * view.scale, 0, Math.PI * 2);
-    ctx.lineWidth = (GAME.TOWER_DIAMETER / 11) * view.scale;
-    ctx.strokeStyle = borderColor;
-    ctx.fillStyle = color;
-    ctx.fill();
-    ctx.stroke();
+    const drewSprite = drawGameTower(ctx, tower, p, view.scale);
+    if (!drewSprite) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, (GAME.TOWER_DIAMETER / 2) * view.scale, 0, Math.PI * 2);
+      ctx.lineWidth = (GAME.TOWER_DIAMETER / 11) * view.scale;
+      ctx.strokeStyle = borderColor;
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.stroke();
+    }
 
     if (invalid) {
       ctx.beginPath();
@@ -5604,7 +5615,7 @@ function drawTowers() {
       ctx.stroke();
     }
 
-    if (!tower.is_invincible) {
+    if (!drewSprite && !tower.is_invincible) {
       ctx.fillStyle = "#FFFFFF";
       ctx.font = `${(GAME.TOWER_DIAMETER / 5.5) * view.scale}px sans-serif`;
       ctx.textAlign = "center";
@@ -5662,16 +5673,27 @@ function drawBuildGhostTower() {
   const color = invalid ? COLORS.danger : getTeamColor(teamId);
   const borderColor = defaults.towerInvincible && !invalid ? "#FFD166" : color;
 
-  ctx.globalAlpha = invalid ? 0.45 : 0.35;
-  ctx.beginPath();
-  ctx.arc(p.x, p.y, (GAME.TOWER_DIAMETER / 2) * view.scale, 0, Math.PI * 2);
-  ctx.lineWidth = (GAME.TOWER_DIAMETER / 11) * view.scale;
-  ctx.strokeStyle = borderColor;
-  ctx.fillStyle = color;
-  ctx.fill();
-  ctx.stroke();
+  const previewTower = { team_id: teamId, health: defaults.towerHealth, is_invincible: defaults.towerInvincible };
+  const drewSprite = drawGameTower(ctx, previewTower, p, view.scale, invalid ? 0.45 : 0.6);
+  if (!drewSprite) {
+    ctx.globalAlpha = invalid ? 0.45 : 0.35;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, (GAME.TOWER_DIAMETER / 2) * view.scale, 0, Math.PI * 2);
+    ctx.lineWidth = (GAME.TOWER_DIAMETER / 11) * view.scale;
+    ctx.strokeStyle = borderColor;
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.stroke();
+  }
+  if (invalid && drewSprite) {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, (GAME.TOWER_DIAMETER / 2) * view.scale, 0, Math.PI * 2);
+    ctx.strokeStyle = COLORS.danger;
+    ctx.lineWidth = 3 * view.scale;
+    ctx.stroke();
+  }
 
-  if (!defaults.towerInvincible) {
+  if (!drewSprite && !defaults.towerInvincible) {
     ctx.globalAlpha = 0.9;
     ctx.fillStyle = "#FFFFFF";
     ctx.font = `${(GAME.TOWER_DIAMETER / 5.5) * view.scale}px sans-serif`;
@@ -5815,16 +5837,18 @@ function drawPasteDraft() {
     const p = worldToScreen(tower.x, tower.y);
     const color = invalid ? COLORS.danger : getTeamColor(tower.team_id);
     const borderColor = tower.is_invincible && !invalid ? "#FFD166" : color;
-    ctx.globalAlpha = invalid ? 0.45 : 0.35;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, (GAME.TOWER_DIAMETER / 2) * view.scale, 0, Math.PI * 2);
-    ctx.lineWidth = (GAME.TOWER_DIAMETER / 11) * view.scale;
-    ctx.strokeStyle = borderColor;
-    ctx.fillStyle = color;
-    ctx.fill();
-    ctx.stroke();
-
-    if (!tower.is_invincible) {
+    const drewSprite = drawGameTower(ctx, tower, p, view.scale, invalid ? 0.45 : 0.6);
+    if (!drewSprite) {
+      ctx.globalAlpha = invalid ? 0.45 : 0.35;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, (GAME.TOWER_DIAMETER / 2) * view.scale, 0, Math.PI * 2);
+      ctx.lineWidth = (GAME.TOWER_DIAMETER / 11) * view.scale;
+      ctx.strokeStyle = borderColor;
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.stroke();
+    }
+    if (!drewSprite && !tower.is_invincible) {
       ctx.globalAlpha = 0.9;
       ctx.fillStyle = "#FFFFFF";
       ctx.font = `${(GAME.TOWER_DIAMETER / 5.5) * view.scale}px sans-serif`;
@@ -6294,14 +6318,17 @@ function renderCleanSceneToCanvas(targetCanvas, scene, options = {}) {
     const p = screen(tower);
     const radius = Math.max(2, (GAME.TOWER_DIAMETER / 2) * scale);
     const color = teamColor(tower.team_id);
-    target.beginPath();
-    target.arc(p.x, p.y, radius, 0, Math.PI * 2);
-    target.fillStyle = color;
-    target.strokeStyle = tower.is_invincible ? "#D5A21B" : "#FFFFFF";
-    target.lineWidth = Math.max(1, Math.min(4, (GAME.TOWER_DIAMETER / 11) * scale));
-    target.fill();
-    target.stroke();
-    if (detail && !tower.is_invincible && radius >= 7) {
+    const drewSprite = drawGameTower(target, tower, p, scale);
+    if (!drewSprite) {
+      target.beginPath();
+      target.arc(p.x, p.y, radius, 0, Math.PI * 2);
+      target.fillStyle = color;
+      target.strokeStyle = tower.is_invincible ? "#D5A21B" : "#FFFFFF";
+      target.lineWidth = Math.max(1, Math.min(4, (GAME.TOWER_DIAMETER / 11) * scale));
+      target.fill();
+      target.stroke();
+    }
+    if (!drewSprite && detail && !tower.is_invincible && radius >= 7) {
       target.fillStyle = "#FFFFFF";
       target.font = `600 ${Math.max(8, Math.min(20, radius * 0.72))}px sans-serif`;
       target.textAlign = "center";
@@ -7055,9 +7082,10 @@ function drawMirrorPreviewEntity(type, item, point) {
   ctx.fillStyle = withAlpha(getTeamColor(item.team_id), 0.5);
   ctx.lineWidth = 2;
   if (type === "tower") {
+    const drewSprite = drawGameTower(ctx, item, p, view.scale, 0.5);
     ctx.beginPath();
     ctx.arc(p.x, p.y, (GAME.TOWER_DIAMETER / 2) * view.scale, 0, Math.PI * 2);
-    ctx.fill();
+    if (!drewSprite) ctx.fill();
     ctx.stroke();
   } else if (type === "spawn") {
     const dims = getSpawnDimensions();
@@ -8752,7 +8780,7 @@ function createNewMapFromMenu() {
 if (!globalThis.__COSMOWAR_EDITOR_TEST__) {
   globalThis.CosmowarEditorUI = {
     setShell(shell) {
-      editorSettings.uiShell = shell === "current" ? "current" : "new";
+      editorSettings.uiShell = "new";
       saveSession();
     },
     setTheme(theme) {
