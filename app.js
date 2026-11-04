@@ -8403,7 +8403,8 @@ function isPlacementInsideBoundary(type, x, y, item = null, mapState = state) {
 
 function isPlacementInsideOuterBoundary(type, x, y, item = null, mapState = state) {
   if (!hasUsableBoundary(mapState)) return false;
-  if (type === "tower") return isCircleInsideBoundary(x, y, GAME.TOWER_DIAMETER / 2, mapState);
+  // Tower centres may touch the polygon edge, leaving half the tower outside.
+  if (type === "tower") return HOLE_GEOMETRY.pointInPolygon({ x, y }, mapState.map_boundaries, true);
   if (type === "bomb") return isCircleInsideBoundary(x, y, getBombRadius(item), mapState);
   if (type === "spawn") {
     const dims = getSpawnDimensions(mapState);
