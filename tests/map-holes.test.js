@@ -711,7 +711,7 @@ test("group snapping falls back to the legal pointer position instead of blockin
   editor.selectKeys([`tower:${tower.uid}`]);
   editor.updateSettings({ snapStrength: 50, objectSnapEnabled: true, gridSnapEnabled: false }, false);
   editor.moveSelectionSnapped(-160, 0);
-  assert.equal(editor.getState().towers[0].x, 40, "invalid snap to x=0 should fall back to the legal raw target");
+  assert.equal(editor.getState().towers[0].x, 0, "snapping the tower centre exactly onto x=0 must now be legal");
 });
 
 test("multi-object moves may be committed in an obstructed position", () => {
@@ -846,4 +846,51 @@ test("cut removes the selection, fills the clipboard, and undoes as one step", (
   const restored = editor.getState();
   assert.equal(restored.towers.length, 3, "undo brings the cut towers back");
   assert.equal(restored.walls.length, 1, "undo brings the wall back");
+});
+
+
+test("towers may be centred directly on every map edge, while centres outside are rejected", () => {
+  const editor = loadEditor();
+  editor.importState(baseMap({
+    towers: [
+      { id: 1, team_id: 0, x: 0, y: 1500, health: 4, is_invincible: false },
+      { id: 2, team_id: 1, x: 4000, y: 1500, health: 3, is_invincible: false },
+      { id: 3, team_id: 0, x: 2000, y: 0, health: 2, is_invincible: false },
+      { id: 4, team_id: 1, x: 2000, y: 3000, health: 1, is_invincible: false },
+      { id: 5, team_id: -1, x: 0, y: 0, health: 4, is_invincible: true },
+    ],
+  }));
+  assert.equal(editor.validationMessages().filter((m) => /Tower .*outside/.test(m)).length, 0);
+  const exported = editor.exportState();
+  assert.equal(exported.towers.length, 5);
+  assert.equal(exported.towers[0].x, 0, "boundary tower centre stays on the edge in exported JSON");
+  for (const point of [[0, 1500], [4000, 1500], [2000, 0], [2000, 3000], [0, 0], [2000, 1500]]) {
+    assert.equal(editor.isPlacementAllowed("tower", ...point), true, "expected allowed at " + point);
+  }
+  for (const point of [[-0.01, 1500], [4000.01, 1500], [2000, -0.01], [2000, 3000.01], [-0.01, -0.01]]) {
+    assert.equal(editor.isPlacementAllowed("tower", ...point), false, "expected rejection at " + point);
+  }
+  editor.importState({ ...baseMap(), towers: [{ id: 1, team_id: 0, x: -10, y: 1500, health: 4, is_invincible: false }] });
+  assert.match(editor.validationMessages().join("\n"), /Tower 1 is outside the map boundary/);
+});
+
+test("edge towers can be imported, exported and reimported without moving inward", () => {
+  const editor = loadEditor();
+  editor.importState(baseMap({
+    towers: [{ id: 42, team_id: -1, x: 0, y: 500, health: 4, is_invincible: true }],
+  }));
+  const exported = editor.exportState();
+  const again = loadEditor();
+  again.importState(exported);
+  assert.equal(again.getState().towers[0].x, 0);
+  assert.equal(again.getState().towers[0].y, 500);
+  assert.equal(again.validationMessages().filter((m) => /Tower .*outside/.test(m)).length, 0);
+});
+
+test("tower centres inside map holes are still forbidden even if the outer boundary allows them", () => {
+  const editor = loadEditor();
+  editor.importState(baseMap({ map_holes: [squareHole] }));
+  assert.equal(editor.isPlacementAllowed("tower", 1000, 1200), false);
+  assert.equal(editor.isPlacementAllowed("tower", 1200, 1200), false);
+  assert.equal(editor.isPlacementAllowed("tower", 900, 1200), true);
 });
