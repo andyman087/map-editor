@@ -711,7 +711,7 @@ test("group snapping falls back to the legal pointer position instead of blockin
   editor.selectKeys([`tower:${tower.uid}`]);
   editor.updateSettings({ snapStrength: 50, objectSnapEnabled: true, gridSnapEnabled: false }, false);
   editor.moveSelectionSnapped(-160, 0);
-  assert.equal(editor.getState().towers[0].x, 40, "invalid snap to x=0 should fall back to the legal raw target");
+  assert.equal(editor.getState().towers[0].x, 0, "snapping the tower centre exactly onto x=0 must now be legal");
 });
 
 test("multi-object moves may be committed in an obstructed position", () => {
