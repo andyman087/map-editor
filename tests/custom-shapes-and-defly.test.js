@@ -201,3 +201,30 @@ test("map conversion rejects invalid live-control values", () => {
   assert.throws(() => convertDeflyMap(deflyText, { unitSize: 0 }), /Unit size must be a positive number/);
   assert.throws(() => convertDeflyMap(deflyText, { boundaryPadding: -1 }), /padding cannot be negative/);
 });
+
+test("Defly conversion leaves edge tower centres on the edge by default", () => {
+  const deflyEdgeMap = [
+    "MAP_WIDTH 100",
+    "MAP_HEIGHT 60",
+    "s 1 20 30",
+    "s 2 80 30",
+    "d 1 0 30 2",
+    "d 2 100 30 2",
+  ].join("\n");
+  const converted = convertDeflyMap(deflyEdgeMap, { spawnProtectionSize: 100, bombClearance: 250 });
+  assert.equal(converted.towers[0].x, converted.map_boundaries[0].x);
+  assert.equal(converted.towers[1].x, converted.map_boundaries[1].x);
+  const editor = loadEditor();
+  editor.importState(converted);
+  assert.equal(editor.validationMessages().filter((message) => /Tower .*outside the map boundary/.test(message)).length, 0);
+});
+
+test("Defly conversion still supports opt-in tower and boundary clearance", () => {
+  const deflyEdgeMap = [
+    "MAP_WIDTH 100", "MAP_HEIGHT 60", "s 1 20 30", "s 2 80 30", "d 1 0 30 2",
+  ].join("\n");
+  const unpadded = convertDeflyMap(deflyEdgeMap, { spawnProtectionSize: 100 });
+  const padded = convertDeflyMap(deflyEdgeMap, { spawnProtectionSize: 100, towerClearance: 35.2, boundaryPadding: 1 });
+  assert.equal(unpadded.towers[0].x, 0);
+  assert.equal(padded.towers[0].x, 36.2);
+});

@@ -10,9 +10,9 @@ function convertDeflyMap(deflyText, scale = 100, spawnProtectionSize = 500) {
   const SOURCE_SPAWN_SIZE = 9;
   const options = scale && typeof scale === "object" ? scale : {};
   const BASE_COORDINATE_SCALE = Number(options.unitSize ?? options.coordinateScale ?? 32);
-  const TARGET_TOWER_RADIUS = Number(options.towerClearance ?? options.towerRadius ?? 35.2);
+  const TARGET_TOWER_RADIUS = Number(options.towerClearance ?? options.towerRadius ?? 0);
   const TARGET_BOMB_RADIUS = Number(options.bombClearance ?? options.bombRadius ?? 250);
-  const TARGET_BOUNDARY_MARGIN = Number(options.boundaryPadding ?? options.boundaryMargin ?? 1);
+  const TARGET_BOUNDARY_MARGIN = Number(options.boundaryPadding ?? options.boundaryMargin ?? 0);
 
   if (typeof deflyText !== "string") {
     throw new TypeError("deflyText must be a string.");
