@@ -214,10 +214,10 @@
         <label class="field"><span>Unit size</span><input id="deflyUnitSizeInput" type="number" min="0.1" max="1000" step="0.1" value="32"></label>
         <label class="field"><span>Spawn protection size</span><input id="deflySpawnSizeInput" type="number" min="1" max="10000" step="10" value="500"></label>
         <div class="dimension-grid">
-          <label class="field"><span>Tower clearance</span><input id="deflyTowerClearanceInput" type="number" min="0" max="5000" step="0.1" value="35.2"></label>
+          <label class="field"><span>Tower clearance (0 = edge centres allowed)</span><input id="deflyTowerClearanceInput" type="number" min="0" max="5000" step="0.1" value="0"></label>
           <label class="field"><span>Bomb clearance</span><input id="deflyBombClearanceInput" type="number" min="0" max="5000" step="1" value="250"></label>
         </div>
-        <label class="field"><span>Boundary padding</span><input id="deflyBoundaryPaddingInput" type="number" min="0" max="5000" step="1" value="1"></label>
+        <label class="field"><span>Extra boundary padding</span><input id="deflyBoundaryPaddingInput" type="number" min="0" max="5000" step="1" value="0"></label>
         <p id="deflyConversionStatus" class="conversion-status">Preparing preview…</p>
         <div class="inline-actions">
           <button id="finishDeflyConversionBtn" class="action-button" type="button">Finish</button>

@@ -6502,9 +6502,9 @@ function beginDeflyConversion(contents, fileName = "source map") {
   el.deflySpacingInput.value = "100";
   el.deflyUnitSizeInput.value = "32";
   el.deflySpawnSizeInput.value = String(Number(state.spawn_protection_size) || 500);
-  el.deflyTowerClearanceInput.value = "35.2";
+  el.deflyTowerClearanceInput.value = "0";
   el.deflyBombClearanceInput.value = "250";
-  el.deflyBoundaryPaddingInput.value = "1";
+  el.deflyBoundaryPaddingInput.value = "0";
   conversionSession = {
     sourceText: String(contents),
     fileName: String(fileName || "source map"),
